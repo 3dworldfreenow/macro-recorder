@@ -1,0 +1,70 @@
+name: Screenshot
+
+on:
+  workflow_run:
+    workflows: ["Build Windows EXE"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  shot:
+    runs-on: windows-latest
+    steps:
+      - name: Download latest exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force app\recordings | Out-Null
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/latest/MacroRecorder.exe" -OutFile app\MacroRecorder.exe
+      - name: Add sample recordings
+        shell: pwsh
+        run: |
+          function Rec($name, $secs) {
+            $ev = @(@{t=0.5; type="move"; x=100; y=100}, @{t=$secs; type="move"; x=200; y=200})
+            @{name=$name; events=$ev} | ConvertTo-Json -Depth 5 | Set-Content "app\recordings\$name.json"
+          }
+          Rec "Login" 12.4
+          Rec "Open Chrome" 5.2
+          Rec "Fill form" 48.9
+          Rec "Logout" 3.7
+          '{"order":["Login.json","Open Chrome.json","Fill form.json","Logout.json"],"disabled":["Logout.json"]}' | Set-Content app\recordings\_playlist.json
+      - name: Run app and take screenshots
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "app\MacroRecorder.exe" -WorkingDirectory app
+          Start-Sleep -Seconds 15
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public struct RECT { public int L, T, R, B; }
+          public class W {
+            [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string n);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+          }
+          "@
+          [W]::SetProcessDPIAware() | Out-Null
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("full_screen.png")
+          $h = [W]::FindWindow($null, "Macro Recorder")
+          "Window handle: $h"
+          if ($h -ne [IntPtr]::Zero) {
+            [W]::SetForegroundWindow($h) | Out-Null
+            Start-Sleep 1
+            $r = New-Object RECT
+            [W]::GetWindowRect($h, [ref]$r) | Out-Null
+            $w = $r.R - $r.L; $hh = $r.B - $r.T
+            "Window rect: $($r.L),$($r.T) ${w}x${hh}"
+            $wb = New-Object System.Drawing.Bitmap $w, $hh
+            $wg = [System.Drawing.Graphics]::FromImage($wb)
+            $wg.CopyFromScreen($r.L, $r.T, 0, 0, (New-Object System.Drawing.Size $w, $hh))
+            $wb.Save("app_window.png")
+          }
+          Get-Process MacroRecorder -ErrorAction SilentlyContinue | Stop-Process
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: "*.png"
