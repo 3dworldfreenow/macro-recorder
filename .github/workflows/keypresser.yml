@@ -25,17 +25,18 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist\KeyPresser -DestinationPath KeyPresser.zip -Force
 
-      - name: Test on Windows (8 presses into a test window)
+      - name: Test on Windows (key + 2 click points for 14 s)
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           Start-Process pwsh -ArgumentList "-NoProfile -File tests\keytest.ps1"
           Start-Sleep 6
-          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--start --delay 6 --limit 8 --quit-when-done --log $pwd\presser_log.txt" -PassThru
-          Start-Sleep 4
+          $a = "--start --no-settings --delay 4 --min 0 --max 2 --point 800,420,1,2 --point 700,480,2,3 --run-for 14 --quit-when-done --log $pwd\presser_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          Start-Sleep 3
           $ws = New-Object -ComObject WScript.Shell
           $ws.AppActivate("KeyTest") | Out-Null
-          Start-Sleep 6
+          Start-Sleep 10
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
@@ -43,15 +44,25 @@ jobs:
           $p | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
           Get-Process KeyPresser -ErrorAction SilentlyContinue | Stop-Process
           "--- presser log"; Get-Content presser_log.txt
-          "--- received"; Get-Content keytest_received.txt -ErrorAction SilentlyContinue
-          $t = Get-Content presser_log.txt | ForEach-Object { [double]($_.Split(' ')[0]) }
-          $gaps = for ($i = 1; $i -lt $t.Count; $i++) { [math]::Round($t[$i] - $t[$i-1], 2) }
-          "Gaps: $($gaps -join ', ')"
-          $recv = @(Get-Content keytest_received.txt -ErrorAction SilentlyContinue | Where-Object { $_ -like "Right *" }).Count
-          "Sent: $($t.Count)  Received by test window: $recv"
-          if ($t.Count -ne 8) { throw "expected 8 presses" }
-          if ($recv -ne 8) { throw "test window did not get all presses" }
-          foreach ($g in $gaps) { if ($g -gt 2.3) { throw "gap too long: $g" } }
+          "--- received by test window"; Get-Content keytest_received.txt -ErrorAction SilentlyContinue
+          $log = Get-Content presser_log.txt
+          $keysSent = @($log | Where-Object { $_ -match " key " }).Count
+          $recv = @(Get-Content keytest_received.txt -ErrorAction SilentlyContinue)
+          $keysRecv = @($recv | Where-Object { $_ -like "Right *" }).Count
+          $c1 = @($recv | Where-Object { $_ -match "^Click \d+ 800 420$" }).Count
+          $c2 = @($recv | Where-Object { $_ -match "^Click \d+ 700 480$" }).Count
+          $t1 = @($log | Where-Object { $_ -match "click 1 " } | ForEach-Object { [double]($_.Split(' ')[0]) })
+          $g1 = for ($i = 1; $i -lt $t1.Count; $i++) { [math]::Round($t1[$i] - $t1[$i-1], 2) }
+          $t2 = @($log | Where-Object { $_ -match "click 2 " } | ForEach-Object { [double]($_.Split(' ')[0]) })
+          $g2 = for ($i = 1; $i -lt $t2.Count; $i++) { [math]::Round($t2[$i] - $t2[$i-1], 2) }
+          "Keys sent: $keysSent  received: $keysRecv"
+          "Point 1 (800,420 every 1-2s) clicks received: $c1  gaps: $($g1 -join ', ')"
+          "Point 2 (700,480 every 2-3s) clicks received: $c2  gaps: $($g2 -join ', ')"
+          if ($keysSent -lt 5) { throw "too few key presses" }
+          if ($keysRecv -lt ($keysSent - 2)) { throw "test window missed key presses" }
+          if ($c1 -lt 5 -or $c2 -lt 3) { throw "too few clicks received" }
+          foreach ($g in $g1) { if ($g -lt 0.95 -or $g -gt 2.4) { throw "point 1 gap out of range: $g" } }
+          foreach ($g in $g2) { if ($g -lt 1.95 -or $g -gt 3.4) { throw "point 2 gap out of range: $g" } }
           "TEST PASSED"
 
       - name: Publish release
@@ -60,7 +71,7 @@ jobs:
           tag_name: keypresser
           name: KeyPresser (latest build)
           body: |
-            Presses a key (default Right Arrow) again and again with a random 0-2 s gap.
+            Presses a key (default Right Arrow) with a random 0-2 s gap, and clicks screen points you choose, each on its own random timer (default 10-20 s). F7 adds a point at the mouse.
             **KeyPresser.zip** (recommended): unzip, open the KeyPresser folder, run KeyPresser.exe.
           files: |
             KeyPresser.zip

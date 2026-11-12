@@ -1,25 +1,46 @@
 #!/usr/bin/env python3
 """
-KeyPresser - presses one keyboard key again and again
-(default: Right Arrow = "next") with a random gap between presses.
+KeyPresser - presses a keyboard key again and again with a random gap,
+and also clicks the mouse on screen points you choose, each point on its
+own random timer (e.g. every 10-20 seconds).
 
-F8 = start / stop     ESC = stop
-The key goes to whichever window is active, so click on that window first
-(or use the start delay to switch to it).
+F7 = add a click point at the current mouse position
+F8 = start / stop      ESC = stop
 
 Needs: pip install pynput
 """
 
 import argparse
+import ctypes
+import json
+import os
 import queue
 import random
+import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
-from pynput import keyboard
+from pynput import keyboard, mouse
 from pynput.keyboard import Key
+from pynput.mouse import Button
+
+# correct coordinates on screens with 125% / 150% scaling
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(BASE_DIR, "keypresser_settings.json")
 
 KEYS = {
     "Right Arrow (next)": Key.right,
@@ -33,6 +54,56 @@ KEYS = {
     "Tab": Key.tab,
     "N": "n",
 }
+CLICK_TYPES = ["Left", "Right", "Double"]
+
+
+class PointDialog(tk.Toplevel):
+    """Add / edit one click point."""
+
+    def __init__(self, parent, point):
+        super().__init__(parent)
+        self.title("Click point")
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+        self.result = None
+        f = ttk.Frame(self, padding=12)
+        f.pack()
+        self.vars = {}
+        rows = [("X:", "x"), ("Y:", "y"), ("Every from (sec):", "min"),
+                ("to (sec):", "max")]
+        for r, (label, k) in enumerate(rows):
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            v = tk.StringVar(value=str(point[k]))
+            ttk.Entry(f, textvariable=v, width=10).grid(row=r, column=1,
+                                                        sticky="w", pady=2)
+            self.vars[k] = v
+        ttk.Label(f, text="Click:").grid(row=4, column=0, sticky="w", pady=2)
+        self.vars["click"] = tk.StringVar(value=point["click"])
+        ttk.Combobox(f, textvariable=self.vars["click"], values=CLICK_TYPES,
+                     state="readonly", width=8).grid(row=4, column=1,
+                                                     sticky="w")
+        b = ttk.Frame(f)
+        b.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(b, text="OK", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(b, text="Cancel", command=self.destroy).pack(side="left")
+        self.grab_set()
+        self.wait_window()
+
+    def ok(self):
+        try:
+            p = {"x": int(float(self.vars["x"].get())),
+                 "y": int(float(self.vars["y"].get())),
+                 "min": max(0.0, float(self.vars["min"].get())),
+                 "max": max(0.0, float(self.vars["max"].get())),
+                 "click": self.vars["click"].get()}
+        except ValueError:
+            messagebox.showerror("Click point", "Please enter numbers",
+                                 parent=self)
+            return
+        if p["max"] < p["min"]:
+            p["min"], p["max"] = p["max"], p["min"]
+        self.result = p
+        self.destroy()
 
 
 class App:
@@ -42,77 +113,246 @@ class App:
         self.stop = threading.Event()
         self.worker = None
         self.kbc = keyboard.Controller()
+        self.msc = mouse.Controller()
         self.sending = False
+        self.points = []
         self.logfile = open(args.log, "a", encoding="utf-8") if args.log else None
 
-        root.title("KeyPresser")
-        root.attributes("-topmost", True)
-        root.resizable(False, False)
-        f = ttk.Frame(root, padding=12)
-        f.pack(fill="both", expand=True)
+        s = self._load_settings()
+        self._build_ui(s)
 
-        ttk.Label(f, text="Key to press:").grid(row=0, column=0, sticky="w")
-        self.key = tk.StringVar(value=args.key if args.key in KEYS
-                                else "Right Arrow (next)")
-        ttk.Combobox(f, textvariable=self.key, values=list(KEYS),
-                     state="readonly", width=20
-                     ).grid(row=0, column=1, columnspan=3, sticky="w", pady=3)
-
-        ttk.Label(f, text="Random gap (sec):").grid(row=1, column=0, sticky="w")
-        self.gmin = tk.StringVar(value=str(args.min))
-        self.gmax = tk.StringVar(value=str(args.max))
-        ttk.Spinbox(f, from_=0, to=600, increment=0.5, width=6,
-                    textvariable=self.gmin).grid(row=1, column=1, sticky="w")
-        ttk.Label(f, text="to").grid(row=1, column=2, padx=4)
-        ttk.Spinbox(f, from_=0, to=600, increment=0.5, width=6,
-                    textvariable=self.gmax).grid(row=1, column=3, sticky="w",
-                                                 pady=3)
-
-        ttk.Label(f, text="Stop after (0 = never):").grid(row=2, column=0,
-                                                         sticky="w")
-        self.limit = tk.StringVar(value=str(args.limit))
-        ttk.Spinbox(f, from_=0, to=999999, increment=1, width=8,
-                    textvariable=self.limit).grid(row=2, column=1,
-                                                  columnspan=2, sticky="w",
-                                                  pady=3)
-        ttk.Label(f, text="presses").grid(row=2, column=3, sticky="w")
-
-        ttk.Label(f, text="Start delay (sec):").grid(row=3, column=0,
-                                                     sticky="w")
-        self.delay = tk.StringVar(value=str(args.delay))
-        ttk.Spinbox(f, from_=0, to=60, increment=1, width=6,
-                    textvariable=self.delay).grid(row=3, column=1, sticky="w",
-                                                  pady=3)
-
-        self.btn = ttk.Button(f, text="▶ Start (F8)", command=self.toggle)
-        self.btn.grid(row=4, column=0, columnspan=4, sticky="ew",
-                      pady=(10, 4), ipady=4)
-        self.status = tk.StringVar(value="Ready")
-        ttk.Label(f, textvariable=self.status, foreground="#0a5"
-                  ).grid(row=5, column=0, columnspan=4)
-        self.count_var = tk.StringVar(value="Presses: 0")
-        ttk.Label(f, textvariable=self.count_var,
-                  font=("Segoe UI", 12, "bold")
-                  ).grid(row=6, column=0, columnspan=4, pady=2)
-        ttk.Label(f, text="F8 start/stop · ESC stop · key goes to the "
-                  "active window", foreground="#777"
-                  ).grid(row=7, column=0, columnspan=4, pady=(4, 0))
+        if args.point:                       # points given on command line
+            self.points = []
+            for spec in args.point:
+                x, y, a, b = (float(v) for v in spec.split(","))
+                self.points.append({"x": int(x), "y": int(y), "min": a,
+                                    "max": b, "click": "Left"})
+        self._refresh_points()
 
         self.listener = keyboard.Listener(on_press=self._on_key)
         self.listener.daemon = True
         self.listener.start()
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(50, self.poll)
+        root.after(100, self._track_mouse)
         if args.start:
             root.after(300, self.start)
 
-    # ---- hotkeys (ignore the keys we send ourselves)
+    # ------------------------------------------------------------ settings
+    def _load_settings(self):
+        s = {}
+        if not self.args.no_settings:
+            try:
+                with open(SETTINGS_FILE, encoding="utf-8") as f:
+                    s = json.load(f)
+            except Exception:
+                s = {}
+        self.points = s.get("points", [])
+        return s
+
+    def _save_settings(self):
+        if self.args.no_settings:
+            return
+        data = {"key_on": self.key_on.get(), "key": self.key.get(),
+                "kmin": self.kmin.get(), "kmax": self.kmax.get(),
+                "limit": self.limit.get(), "delay": self.delay.get(),
+                "pmin": self.pmin.get(), "pmax": self.pmax.get(),
+                "restore": self.restore.get(), "points": self.points}
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------ UI
+    def _build_ui(self, s):
+        a = self.args
+        r = self.root
+        r.title("KeyPresser")
+        r.attributes("-topmost", True)
+        r.minsize(470, 520)
+        main = ttk.Frame(r, padding=10)
+        main.pack(fill="both", expand=True)
+
+        # --- keyboard
+        kf = ttk.LabelFrame(main, text="Keyboard", padding=8)
+        kf.pack(fill="x")
+        self.key_on = tk.BooleanVar(value=s.get("key_on", not a.no_key))
+        ttk.Checkbutton(kf, text="Press key:", variable=self.key_on
+                        ).grid(row=0, column=0, sticky="w")
+        key = a.key if a.key else s.get("key", "Right Arrow (next)")
+        self.key = tk.StringVar(value=key if key in KEYS
+                                else "Right Arrow (next)")
+        ttk.Combobox(kf, textvariable=self.key, values=list(KEYS),
+                     state="readonly", width=20
+                     ).grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+
+        ttk.Label(kf, text="Random gap (sec):").grid(row=1, column=0,
+                                                    sticky="w")
+        self.kmin = tk.StringVar(value=str(a.min if a.min is not None
+                                           else s.get("kmin", "0")))
+        self.kmax = tk.StringVar(value=str(a.max if a.max is not None
+                                           else s.get("kmax", "2")))
+        ttk.Spinbox(kf, from_=0, to=600, increment=0.5, width=6,
+                    textvariable=self.kmin).grid(row=1, column=1, sticky="w")
+        ttk.Label(kf, text="to").grid(row=1, column=2, padx=4)
+        ttk.Spinbox(kf, from_=0, to=600, increment=0.5, width=6,
+                    textvariable=self.kmax).grid(row=1, column=3, sticky="w",
+                                                 pady=2)
+        ttk.Label(kf, text="Stop key after (0 = never):").grid(
+            row=2, column=0, sticky="w")
+        self.limit = tk.StringVar(value=str(a.limit if a.limit is not None
+                                            else s.get("limit", "0")))
+        ttk.Spinbox(kf, from_=0, to=999999, increment=1, width=8,
+                    textvariable=self.limit).grid(row=2, column=1,
+                                                  columnspan=2, sticky="w",
+                                                  pady=2)
+
+        # --- mouse points
+        mf = ttk.LabelFrame(main, text="Mouse click points (each on its own "
+                                       "timer)", padding=8)
+        mf.pack(fill="both", expand=True, pady=8)
+        cols = ("n", "x", "y", "click", "every")
+        self.tree = ttk.Treeview(mf, columns=cols, show="headings", height=5)
+        for c, t, w in (("n", "#", 30), ("x", "X", 60), ("y", "Y", 60),
+                        ("click", "Click", 60), ("every", "Every (sec)", 100)):
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="center")
+        self.tree.grid(row=0, column=0, rowspan=5, sticky="nsew")
+        mf.columnconfigure(0, weight=1)
+        mf.rowconfigure(4, weight=1)
+        self.tree.bind("<Double-1>", lambda e: self.edit_point())
+        for i, (t, cmd) in enumerate((("Add (F7)", self.add_point_here),
+                                      ("Edit", self.edit_point),
+                                      ("Delete", self.delete_point),
+                                      ("Test click", self.test_point))):
+            ttk.Button(mf, text=t, width=11, command=cmd
+                       ).grid(row=i, column=1, padx=(8, 0), pady=1, sticky="n")
+
+        d = ttk.Frame(mf)
+        d.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(d, text="New points: every").pack(side="left")
+        self.pmin = tk.StringVar(value=str(s.get("pmin", "10")))
+        self.pmax = tk.StringVar(value=str(s.get("pmax", "20")))
+        ttk.Spinbox(d, from_=0, to=3600, increment=1, width=5,
+                    textvariable=self.pmin).pack(side="left", padx=3)
+        ttk.Label(d, text="to").pack(side="left")
+        ttk.Spinbox(d, from_=0, to=3600, increment=1, width=5,
+                    textvariable=self.pmax).pack(side="left", padx=3)
+        ttk.Label(d, text="sec").pack(side="left")
+
+        self.restore = tk.BooleanVar(value=s.get("restore", True))
+        ttk.Checkbutton(mf, text="Put mouse back where it was after each click",
+                        variable=self.restore
+                        ).grid(row=6, column=0, columnspan=2, sticky="w")
+        self.mouse_pos = tk.StringVar(value="Mouse now: -")
+        ttk.Label(mf, textvariable=self.mouse_pos, foreground="#06c"
+                  ).grid(row=7, column=0, columnspan=2, sticky="w",
+                         pady=(4, 0))
+
+        # --- start
+        sf = ttk.Frame(main)
+        sf.pack(fill="x")
+        ttk.Label(sf, text="Start delay (sec):").pack(side="left")
+        self.delay = tk.StringVar(value=str(a.delay if a.delay is not None
+                                            else s.get("delay", "3")))
+        ttk.Spinbox(sf, from_=0, to=60, increment=1, width=5,
+                    textvariable=self.delay).pack(side="left", padx=4)
+
+        self.btn = ttk.Button(main, text="▶ Start (F8)", command=self.toggle)
+        self.btn.pack(fill="x", pady=(8, 4), ipady=4)
+        self.status = tk.StringVar(value="Ready")
+        ttk.Label(main, textvariable=self.status, foreground="#0a5").pack()
+        self.count_var = tk.StringVar(value="Key presses: 0 · Clicks: 0")
+        ttk.Label(main, textvariable=self.count_var,
+                  font=("Segoe UI", 11, "bold")).pack(pady=2)
+        ttk.Label(main, text="F7 add point at mouse · F8 start/stop · ESC stop",
+                  foreground="#777").pack()
+
+    def _refresh_points(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, p in enumerate(self.points):
+            self.tree.insert("", "end", iid=str(i), values=(
+                i + 1, p["x"], p["y"], p["click"],
+                f"{p['min']:g} - {p['max']:g}"))
+
+    def _track_mouse(self):
+        try:
+            x, y = self.msc.position
+            self.mouse_pos.set(f"Mouse now: X {int(x)}, Y {int(y)}   "
+                               "(press F7 to add this spot)")
+        except Exception:
+            pass
+        self.root.after(100, self._track_mouse)
+
+    # ------------------------------------------------------------ points
+    def _sel(self):
+        s = self.tree.selection()
+        return int(s[0]) if s else None
+
+    def add_point_here(self):
+        if self.running():
+            return
+        x, y = self.msc.position
+        try:
+            a, b = float(self.pmin.get()), float(self.pmax.get())
+        except ValueError:
+            a, b = 10.0, 20.0
+        a, b = min(a, b), max(a, b)
+        self.points.append({"x": int(x), "y": int(y), "min": a, "max": b,
+                            "click": "Left"})
+        self._refresh_points()
+        self._save_settings()
+        self.status.set(f"Added point {len(self.points)} at {int(x)}, {int(y)}")
+
+    def edit_point(self):
+        i = self._sel()
+        if i is None or self.running():
+            return
+        d = PointDialog(self.root, self.points[i])
+        if d.result:
+            self.points[i] = d.result
+            self._refresh_points()
+            self._save_settings()
+
+    def delete_point(self):
+        i = self._sel()
+        if i is None or self.running():
+            return
+        del self.points[i]
+        self._refresh_points()
+        self._save_settings()
+
+    def test_point(self):
+        i = self._sel()
+        if i is None or self.running():
+            return
+        self.click_point(self.points[i], self.restore.get())
+
+    def click_point(self, p, restore):
+        old = self.msc.position
+        self.msc.position = (p["x"], p["y"])
+        time.sleep(0.05)
+        if p["click"] == "Right":
+            self.msc.click(Button.right, 1)
+        elif p["click"] == "Double":
+            self.msc.click(Button.left, 2)
+        else:
+            self.msc.click(Button.left, 1)
+        if restore:
+            time.sleep(0.05)
+            self.msc.position = old
+
+    # ------------------------------------------------------------ hotkeys
     def _on_key(self, key):
         if key == Key.f8:
             self.q.put(("toggle", None))
+        elif key == Key.f7:
+            self.q.put(("addpoint", None))
         elif key == Key.esc and not self.sending:
             self.q.put(("stop", None))
 
+    # ------------------------------------------------------------ run
     def running(self):
         return self.worker is not None and self.worker.is_alive()
 
@@ -126,54 +366,94 @@ class App:
         if self.running():
             return
         try:
-            a, b = float(self.gmin.get()), float(self.gmax.get())
+            kmin, kmax = float(self.kmin.get()), float(self.kmax.get())
             limit = max(0, int(float(self.limit.get())))
             delay = max(0, int(float(self.delay.get())))
         except ValueError:
             self.status.set("Check the numbers")
             return
-        a, b = max(0.0, min(a, b)), max(0.0, max(a, b))
-        key = KEYS.get(self.key.get(), Key.right)
+        kmin, kmax = max(0.0, min(kmin, kmax)), max(0.0, max(kmin, kmax))
+        cfg = {"key_on": self.key_on.get(),
+               "key": KEYS.get(self.key.get(), Key.right),
+               "kmin": kmin, "kmax": kmax, "limit": limit, "delay": delay,
+               "points": [dict(p) for p in self.points],
+               "restore": self.restore.get(),
+               "run_for": self.args.run_for}
+        if not cfg["key_on"] and not cfg["points"]:
+            self.status.set("Turn on the key or add a click point first")
+            return
+        self._save_settings()
         self.stop.clear()
-        self.worker = threading.Thread(target=self.work,
-                                       args=(key, a, b, limit, delay),
+        self.worker = threading.Thread(target=self.work, args=(cfg,),
                                        daemon=True)
         self.worker.start()
         self.btn.config(text="■ Stop (F8 / ESC)")
 
-    def wait(self, secs):
-        end = time.perf_counter() + secs
-        while not self.stop.is_set() and time.perf_counter() < end:
-            time.sleep(0.01)
-        return not self.stop.is_set()
-
-    def work(self, key, a, b, limit, delay):
-        for s in range(delay, 0, -1):
-            self.q.put(("status", f"Starting in {s}... click your window"))
-            if not self.wait(1):
-                break
-        n = 0
+    def wait_until(self, t):
         while not self.stop.is_set():
-            self.sending = True
-            try:
-                self.kbc.press(key)
-                time.sleep(0.03)
-                self.kbc.release(key)
-            finally:
-                time.sleep(0.02)
-                self.sending = False
-            n += 1
-            self.q.put(("count", n))
-            if limit and n >= limit:
-                self.q.put(("status", f"Done - {n} presses"))
+            left = t - time.perf_counter()
+            if left <= 0:
+                return True
+            time.sleep(min(left, 0.01))
+        return False
+
+    def work(self, cfg):
+        for s in range(cfg["delay"], 0, -1):
+            self.q.put(("status", f"Starting in {s}... click your window"))
+            if not self.wait_until(time.perf_counter() + 1):
+                self.q.put(("finished", "Stopped"))
+                return
+
+        start = time.perf_counter()
+        deadline = start + cfg["run_for"] if cfg["run_for"] else None
+        tasks = []
+        if cfg["key_on"]:
+            tasks.append({"kind": "key", "next": start})
+        for i, p in enumerate(cfg["points"]):
+            tasks.append({"kind": "point", "i": i, "p": p,
+                          "next": start + random.uniform(p["min"], p["max"])})
+        nkeys = nclicks = 0
+        self.q.put(("status", "Running... (F8 / ESC to stop)"))
+
+        while tasks and not self.stop.is_set():
+            t = min(tasks, key=lambda x: x["next"])
+            if deadline and t["next"] > deadline:
+                self.wait_until(deadline)
                 break
-            gap = random.uniform(a, b)
-            self.q.put(("status", f"Pressed #{n} · next in {gap:.2f}s"))
-            if not self.wait(gap):
+            if not self.wait_until(t["next"]):
                 break
-        if self.stop.is_set():
-            self.q.put(("status", f"Stopped after {n} presses"))
-        self.q.put(("finished", None))
+            if t["kind"] == "key":
+                self.sending = True
+                try:
+                    self.kbc.press(cfg["key"])
+                    time.sleep(0.03)
+                    self.kbc.release(cfg["key"])
+                finally:
+                    time.sleep(0.02)
+                    self.sending = False
+                nkeys += 1
+                self.q.put(("log", f"key {nkeys}"))
+                if cfg["limit"] and nkeys >= cfg["limit"]:
+                    tasks.remove(t)
+                else:
+                    t["next"] = time.perf_counter() + random.uniform(
+                        cfg["kmin"], cfg["kmax"])
+            else:
+                p = t["p"]
+                try:
+                    self.click_point(p, cfg["restore"])
+                except Exception as e:
+                    self.q.put(("status", f"Click error: {e}"))
+                nclicks += 1
+                self.q.put(("log", f"click {t['i'] + 1} {p['x']} {p['y']}"))
+                t["next"] = time.perf_counter() + random.uniform(p["min"],
+                                                                 p["max"])
+            self.q.put(("count", (nkeys, nclicks)))
+
+        msg = (f"Stopped · {nkeys} key presses, {nclicks} clicks"
+               if self.stop.is_set() else
+               f"Done · {nkeys} key presses, {nclicks} clicks")
+        self.q.put(("finished", msg))
 
     def poll(self):
         try:
@@ -181,16 +461,21 @@ class App:
                 msg, val = self.q.get_nowait()
                 if msg == "toggle":
                     self.toggle()
+                elif msg == "addpoint":
+                    self.add_point_here()
                 elif msg == "stop":
                     self.stop.set()
                 elif msg == "status":
                     self.status.set(val)
                 elif msg == "count":
-                    self.count_var.set(f"Presses: {val}")
+                    self.count_var.set(f"Key presses: {val[0]} · "
+                                       f"Clicks: {val[1]}")
+                elif msg == "log":
                     if self.logfile:
-                        self.logfile.write(f"{time.time():.3f} press {val}\n")
+                        self.logfile.write(f"{time.time():.3f} {val}\n")
                         self.logfile.flush()
                 elif msg == "finished":
+                    self.status.set(val)
                     self.btn.config(text="▶ Start (F8)")
                     if self.args.quit_when_done:
                         self.close()
@@ -201,6 +486,7 @@ class App:
 
     def close(self):
         self.stop.set()
+        self._save_settings()
         try:
             self.listener.stop()
         except Exception:
@@ -213,13 +499,19 @@ class App:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--key", default="Right Arrow (next)")
-    p.add_argument("--min", type=float, default=0)
-    p.add_argument("--max", type=float, default=2)
-    p.add_argument("--limit", type=int, default=0)
-    p.add_argument("--delay", type=int, default=3)
+    p.add_argument("--key", default=None)
+    p.add_argument("--no-key", action="store_true")
+    p.add_argument("--min", type=float, default=None)
+    p.add_argument("--max", type=float, default=None)
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--delay", type=int, default=None)
+    p.add_argument("--point", action="append",
+                   help="X,Y,MIN,MAX  (can repeat)")
+    p.add_argument("--run-for", type=float, default=0,
+                   help="stop after this many seconds")
     p.add_argument("--start", action="store_true")
     p.add_argument("--quit-when-done", action="store_true")
+    p.add_argument("--no-settings", action="store_true")
     p.add_argument("--log", default="")
     args, _ = p.parse_known_args()
     root = tk.Tk()
