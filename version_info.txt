@@ -1,0 +1,15 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(1,1,0,0), prodvers=(1,1,0,0), mask=0x3f, flags=0x0,
+                    OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', '3dworldfreenow'),
+      StringStruct('FileDescription', 'Macro Recorder - record and replay keyboard and mouse'),
+      StringStruct('FileVersion', '1.1.0'),
+      StringStruct('InternalName', 'MacroRecorder'),
+      StringStruct('OriginalFilename', 'MacroRecorder.exe'),
+      StringStruct('ProductName', 'Macro Recorder'),
+      StringStruct('ProductVersion', '1.1.0')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

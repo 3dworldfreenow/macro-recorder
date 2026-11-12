@@ -17,17 +17,22 @@ jobs:
           python-version: "3.12"
       - name: Install packages
         run: python -m pip install pynput pyinstaller
-      - name: Build exe
-        run: python -m PyInstaller --onefile --windowed --name MacroRecorder MacroRecorder.py
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MacroRecorder
-          path: dist/MacroRecorder.exe
+      - name: Build folder version (zip) - fewer antivirus warnings
+        run: python -m PyInstaller --noconfirm --onedir --windowed --noupx --version-file version_info.txt --name MacroRecorder MacroRecorder.py
+      - name: Make zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\MacroRecorder -DestinationPath MacroRecorder.zip -Force
+      - name: Build single-file exe
+        run: python -m PyInstaller --noconfirm --onefile --windowed --noupx --version-file version_info.txt --name MacroRecorder --distpath dist1 MacroRecorder.py
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: MacroRecorder (latest build)
-          files: dist/MacroRecorder.exe
+          body: |
+            **MacroRecorder.zip** (recommended): unzip it, open the MacroRecorder folder, double-click MacroRecorder.exe.
+            **MacroRecorder.exe**: single file, but antivirus is more likely to warn about it.
+          files: |
+            MacroRecorder.zip
+            dist1/MacroRecorder.exe
           make_latest: true
