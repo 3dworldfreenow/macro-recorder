@@ -312,8 +312,45 @@ class Dialog(tk.Toplevel):
         self.result = None
         self.foot = tk.Frame(self, bg=self.BG, padx=16, pady=12)
         self.foot.pack(side="bottom", fill="x")    # OK/Cancel always visible
-        self.body = tk.Frame(self, bg=self.BG, padx=16, pady=10)
-        self.body.pack(fill="both", expand=True)
+        # scrollable body (drag with a finger, scrollbar or mouse wheel)
+        self.vsb = ttk.Scrollbar(self, orient="vertical")
+        self.canvas = tk.Canvas(self, bg=self.BG, highlightthickness=0,
+                                yscrollcommand=self.vsb.set)
+        self.vsb.config(command=self.canvas.yview)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.body = tk.Frame(self.canvas, bg=self.BG, padx=16, pady=10)
+        self.canvas.create_window(0, 0, window=self.body, anchor="nw")
+        self.body.bind("<Configure>", self._resize)
+        self.bind("<ButtonPress-1>", self._press, add="+")
+        self.bind("<B1-Motion>", self._motion, add="+")
+        self.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(
+            int(-e.delta / 120), "units"), add="+")
+        self._y0, self._f0, self._drag = 0, 0.0, False
+
+    def _resize(self, e=None):
+        bw = self.body.winfo_reqwidth()
+        bh = self.body.winfo_reqheight()
+        avail = (self.winfo_screenheight() - 80
+                 - self.foot.winfo_reqheight())
+        ch = max(150, min(bh, avail))
+        self.canvas.config(width=bw, height=ch, scrollregion=(0, 0, bw, bh))
+        if bh > ch:
+            if not self.vsb.winfo_ismapped():
+                self.vsb.pack(side="right", fill="y", before=self.canvas)
+        elif self.vsb.winfo_ismapped():
+            self.vsb.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def _press(self, e):
+        self._y0, self._f0, self._drag = (e.y_root, self.canvas.yview()[0],
+                                          False)
+
+    def _motion(self, e):
+        dy = e.y_root - self._y0
+        if self._drag or abs(dy) > 12:
+            self._drag = True
+            bh = max(1, self.body.winfo_reqheight())
+            self.canvas.yview_moveto(max(0.0, self._f0 - dy / bh))
 
     def label(self, master, text, size=12, bold=True, fg="#1a1a1a"):
         return tk.Label(master, text=text, bg=self.BG, fg=fg, anchor="w",
@@ -331,10 +368,11 @@ class Dialog(tk.Toplevel):
 
     def run(self):
         self.update_idletasks()
+        self._resize()
+        self.update_idletasks()
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        h = min(h, sh - 70)
-        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}"
+        self.geometry(f"+{max(0, (sw - w) // 2)}"
                       f"+{max(0, min((sh - h) // 3, sh - h - 60))}")
         self.grab_set()
         self.wait_window()
@@ -405,8 +443,25 @@ class StepDialog(Dialog):
         self.url = tk.StringVar(value=s.get("url", ""))
         self.amin = tk.StringVar(value=fmt(s.get("amin", 0)))
         self.amax = tk.StringVar(value=fmt(s.get("amax", 2)))
+        self.name = tk.StringVar(value=s.get("name", ""))
+        self.run_mode = tk.StringVar(
+            value="Only once (first loop)" if s.get("run") == "once"
+            else "Every loop")
 
         b = self.body
+        nr = tk.Frame(b, bg=self.BG)
+        nr.pack(fill="x", pady=(0, 8))
+        self.label(nr, "Name:  ").pack(side="left")
+        ne = tk.Entry(nr, textvariable=self.name, font=(FONT, 14),
+                      relief="solid", bd=1)
+        ne.pack(side="left", fill="x", expand=True, ipady=6)
+        soft_button(nr, "⌨", lambda: (ne.focus_set(), open_touch_keyboard()),
+                    size=13, padx=12, pady=4).pack(side="left", padx=(6, 0))
+        rr = tk.Frame(b, bg=self.BG)
+        rr.pack(fill="x", pady=(0, 8))
+        self.label(rr, "Runs:   ").pack(side="left")
+        Choice(rr, self.run_mode, ["Every loop", "Only once (first loop)"],
+               cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
         Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait"],
                cols=4, size=13).pack(fill="x", pady=(4, 10))
@@ -480,7 +535,10 @@ class StepDialog(Dialog):
         k = self.kind()
         amin, amax = sorted((max(0, fnum(self.amin.get())),
                              max(0, fnum(self.amax.get()))))
-        st = {"type": k, "amin": amin, "amax": amax}
+        st = {"type": k, "amin": amin, "amax": amax,
+              "name": self.name.get().strip(),
+              "run": ("once" if self.run_mode.get().startswith("Only")
+                      else "every")}
         if k in ("click", "key"):
             tmin, tmax = sorted((max(0, fnum(self.tmin.get())),
                                  max(0, fnum(self.tmax.get()))))
@@ -776,8 +834,10 @@ class App:
         self.nb.add(sq, text=" ▶ Sequence ")
         self._lbl(sq, "Steps run from top to bottom, then start again.",
                   fg="#555").pack(anchor="w")
-        fr, self.stree = self._tree(sq, [("n", "#", 40, "center"),
-                                         ("step", "Step", 340, "w"),
+        fr, self.stree = self._tree(sq, [("n", "#", 36, "center"),
+                                         ("name", "Name", 120, "w"),
+                                         ("step", "Step", 250, "w"),
+                                         ("run", "Runs", 70, "center"),
                                          ("wait", "Then wait", 110,
                                           "center")], height=6)
         fr.pack(fill="both", expand=True, pady=6)
@@ -958,7 +1018,8 @@ class App:
         self.stree.delete(*self.stree.get_children())
         for i, st in enumerate(self.steps):
             self.stree.insert("", "end", iid=str(i), values=(
-                i + 1, describe(st),
+                i + 1, st.get("name", ""), describe(st),
+                "Once" if st.get("run") == "once" else "Every",
                 span(st.get("amin", 0), st.get("amax", 0)) + " s"))
         if select is not None and 0 <= select < len(self.steps):
             self.stree.selection_set(str(select))
@@ -1332,7 +1393,10 @@ class App:
             self.q.put(("finished", "Stopped"))
             return
         loop = 0
+        every = any(st.get("run") != "once" for st in steps)
         while (loops == 0 or loop < loops) and not self.stop.is_set():
+            if loop >= 1 and not every:
+                break          # only "once" steps: nothing left to repeat
             loop += 1
             total = "∞" if loops == 0 else loops
             for i, st in enumerate(steps):
@@ -1340,8 +1404,12 @@ class App:
                     break
                 if not test:
                     self.q.put(("highlight", i))
-                self.q.put(("status", f"Loop {loop}/{total} · step "
-                            f"{i + 1}/{len(steps)}"))
+                if st.get("run") == "once" and loop > 1:
+                    continue
+                nm = st.get("name") or ""
+                label = (f"Loop {loop}/{total} · step {i + 1}/{len(steps)}"
+                         + (f" · {nm}" if nm else ""))
+                self.q.put(("status", label))
                 t = st.get("type")
                 times = max(1, int(st.get("times", 1)))
                 if t in ("click", "key"):
@@ -1370,9 +1438,7 @@ class App:
                     self.q.put(("count", n))
                 gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
                 if gap > 0 and not self.stop.is_set():
-                    self.q.put(("status", f"Loop {loop}/{total} · step "
-                                f"{i + 1}/{len(steps)} · waiting "
-                                f"{gap:.1f}s"))
+                    self.q.put(("status", f"{label} · waiting {gap:.1f}s"))
                     self.wait(gap)
         done = (f"{n['click']} clicks, {n['key']} key presses, "
                 f"{n['link']} links")

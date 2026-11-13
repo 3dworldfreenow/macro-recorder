@@ -1,0 +1,4 @@
+{"loops": 3, "steps": [
+ {"type": "key", "key": "Home", "times": 1, "name": "Start (once)", "run": "once", "amin": 0.2, "amax": 0.2},
+ {"type": "key", "key": "End", "times": 1, "name": "Every loop", "run": "every", "amin": 0.2, "amax": 0.2}
+]}

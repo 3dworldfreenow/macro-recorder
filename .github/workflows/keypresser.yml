@@ -178,6 +178,17 @@ jobs:
           if ($gap -lt 1.95 -or $gap -gt 2.6) { throw "link gap wrong" }
           "SEQUENCE LINK TEST PASSED"
 
+      - name: Test once / every loop steps (3 loops)
+        shell: pwsh
+        run: |
+          $a = "--mode sequence --seq-file tests\seq_once.json --start --no-settings --delay 1 --quit-when-done --log $pwd\seqonce_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          $log = @(Get-Content seqonce_log.txt); $log
+          $order = ($log | ForEach-Object { $_.Split(' ')[5] }) -join ','
+          "Order: $order"
+          if ($order -ne "Home,End,End,End") { throw "once step should run only in loop 1" }
+          "ONCE/EVERY TEST PASSED"
+
       - name: Screenshots (sequence tab, step editor)
         shell: pwsh
         run: |
