@@ -376,6 +376,12 @@ class Dialog(tk.Toplevel):
                       f"+{max(0, min((sh - h) // 3, sh - h - 60))}")
         self.grab_set()
         self.wait_window()
+        if isinstance(self.parent, Dialog):      # back to the dialog below
+            try:
+                self.parent.grab_set()
+                self.parent.lift()
+            except Exception:
+                pass
         return self.result
 
     def pick_into(self, xvar, yvar):
@@ -635,6 +641,179 @@ class LinkDialog(Dialog):
         self.destroy()
 
 
+class NameDialog(Dialog):
+    def __init__(self, parent, title, value=""):
+        super().__init__(parent, title)
+        self.var = tk.StringVar(value=value)
+        self.label(self.body, "Name:").pack(anchor="w")
+        r = tk.Frame(self.body, bg=self.BG)
+        r.pack(fill="x", pady=(2, 4))
+        e = tk.Entry(r, textvariable=self.var, font=(FONT, 15),
+                     relief="solid", bd=1, width=26)
+        e.pack(side="left", fill="x", expand=True, ipady=8)
+        soft_button(r, "⌨", lambda: (e.focus_set(), open_touch_keyboard()),
+                    size=13, padx=12, pady=6).pack(side="left", padx=(6, 0))
+        e.focus_set()
+        e.select_range(0, "end")
+        self.bind("<Return>", lambda ev: self.ok())
+        self.footer()
+
+    def ok(self):
+        v = self.var.get().strip()
+        if not v:
+            messagebox.showerror("Name", "Please type a name", parent=self)
+            return
+        self.result = v
+        self.destroy()
+
+
+class SeqListDialog(Dialog):
+    """List of all sequences: open, new, rename, copy, delete, reorder."""
+
+    def __init__(self, app):
+        super().__init__(app.root, "My sequences")
+        self.app = app
+        self.label(self.body, "Tap a sequence, then tap Open.",
+                   bold=False, fg="#555").pack(anchor="w")
+        fr = tk.Frame(self.body, bg=self.BG)
+        fr.pack(fill="both", expand=True, pady=6)
+        self.tv = ttk.Treeview(fr, columns=("n", "name", "steps", "rep"),
+                               show="headings", height=7,
+                               selectmode="browse")
+        for c, t, w, a in (("n", "#", 40, "center"),
+                           ("name", "Name", 260, "w"),
+                           ("steps", "Steps", 80, "center"),
+                           ("rep", "Repeat", 100, "center")):
+            self.tv.heading(c, text=t)
+            self.tv.column(c, width=w, anchor=a)
+        sb = ttk.Scrollbar(fr, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.bind("<Double-1>", lambda e: self.ok())
+        g = tk.Frame(self.body, bg=self.BG)
+        g.pack(fill="x")
+        for i, (t, cmd) in enumerate((("➕ New", self.new),
+                                      ("✏ Rename", self.rename),
+                                      ("⧉ Copy", self.copy),
+                                      ("🗑 Delete", self.delete),
+                                      ("▲ Up", lambda: self.move(-1)),
+                                      ("▼ Down", lambda: self.move(1)))):
+            soft_button(g, t, cmd).grid(row=i // 3, column=i % 3,
+                                        sticky="ew", padx=3, pady=3)
+        for c in range(3):
+            g.columnconfigure(c, weight=1, uniform="b")
+        self.refresh(app.cur)
+        self.footer()
+        self.ok_btn.config(text="✔  Open")
+
+    def footer(self):
+        super().footer()
+        self.ok_btn = self.foot.winfo_children()[0]
+
+    def sel(self):
+        s = self.tv.selection()
+        return int(s[0]) if s else None
+
+    def refresh(self, select=None):
+        self.app._sync_loops()
+        self.tv.delete(*self.tv.get_children())
+        for i, sq in enumerate(self.app.seqs):
+            lp = int(fnum(sq.get("loops", 0)))
+            self.tv.insert("", "end", iid=str(i), values=(
+                i + 1, ("▶ " if i == self.app.cur else "") + sq["name"],
+                len(sq["steps"]), "forever" if lp == 0 else f"{lp} times"))
+        if select is not None and 0 <= select < len(self.app.seqs):
+            self.tv.selection_set(str(select))
+            self.tv.see(str(select))
+
+    def unique(self, name):
+        names = {s["name"].lower() for s in self.app.seqs}
+        if name.lower() not in names:
+            return name
+        n = 2
+        while f"{name} ({n})".lower() in names:
+            n += 1
+        return f"{name} ({n})"
+
+    def new(self):
+        name = NameDialog(self, "New sequence",
+                          self.unique(f"Sequence {len(self.app.seqs) + 1}")
+                          ).run()
+        if name:
+            self.app.seqs.append({"name": self.unique(name), "loops": "0",
+                                  "steps": []})
+            self.app._save_settings()
+            self.refresh(len(self.app.seqs) - 1)
+
+    def rename(self):
+        i = self.sel()
+        if i is None:
+            return
+        name = NameDialog(self, "Rename sequence",
+                          self.app.seqs[i]["name"]).run()
+        if name:
+            self.app.seqs[i]["name"] = name
+            self.app._save_settings()
+            self.app._update_seq_btn()
+            self.refresh(i)
+
+    def copy(self):
+        i = self.sel()
+        if i is None:
+            return
+        src = self.app.seqs[i]
+        self.app.seqs.insert(i + 1, {
+            "name": self.unique(src["name"] + " copy"),
+            "loops": src.get("loops", "0"),
+            "steps": [dict(st) for st in src["steps"]]})
+        if self.app.cur > i:
+            self.app.cur += 1
+        self.app._save_settings()
+        self.refresh(i + 1)
+
+    def delete(self):
+        i = self.sel()
+        if i is None:
+            return
+        if len(self.app.seqs) == 1:
+            messagebox.showinfo("Delete", "You need at least one sequence.",
+                                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Delete", f"Delete '{self.app.seqs[i]['name']}'?",
+                parent=self):
+            return
+        del self.app.seqs[i]
+        if self.app.cur == i:
+            self.app.cur = -1
+            self.app.switch_seq(min(i, len(self.app.seqs) - 1))
+        elif self.app.cur > i:
+            self.app.cur -= 1
+        self.app._save_settings()
+        self.refresh(min(i, len(self.app.seqs) - 1))
+
+    def move(self, d):
+        i = self.sel()
+        if i is None:
+            return
+        j = i + d
+        seqs = self.app.seqs
+        if 0 <= j < len(seqs):
+            seqs[i], seqs[j] = seqs[j], seqs[i]
+            if self.app.cur == i:
+                self.app.cur = j
+            elif self.app.cur == j:
+                self.app.cur = i
+            self.app._save_settings()
+            self.refresh(j)
+
+    def ok(self):
+        i = self.sel()
+        self.result = i if i is not None else self.app.cur
+        self.destroy()
+
+
 class KeyChooser(Dialog):
     def __init__(self, parent, current):
         super().__init__(parent, "Choose key")
@@ -699,6 +878,8 @@ class App:
             root.after(400, self.start)
         if args.open_picker:
             root.after(800, self.pick_point)
+        if args.open_seq_list:
+            root.after(800, self.open_seq_list)
         if args.open_step_editor is not None:
             root.after(800, lambda: self.edit_step(args.open_step_editor))
 
@@ -713,7 +894,13 @@ class App:
                 s = {}
         self.points = s.get("points", [])
         self.links = s.get("links", [])
-        self.steps = s.get("steps", [])
+        seqs = s.get("seqs")
+        if not seqs:                       # older settings: one sequence
+            seqs = [{"name": "Sequence 1", "loops": str(s.get("loops", "0")),
+                     "steps": s.get("steps", [])}]
+        self.seqs = seqs
+        self.cur = min(max(0, int(fnum(s.get("cur", 0)))), len(seqs) - 1)
+        self.steps = self.seqs[self.cur]["steps"]
         return s
 
     def _save_settings(self):
@@ -726,7 +913,7 @@ class App:
                 "restore": self.restore.get(), "points": self.points,
                 "points_on": self.points_on.get(),
                 "links_on": self.links_on.get(), "links": self.links,
-                "steps": self.steps, "loops": self.loops.get(),
+                "seqs": self._sync_loops(), "cur": self.cur,
                 "hide": self.hide.get()}
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -757,9 +944,18 @@ class App:
         if a.seq_file:
             with open(a.seq_file, encoding="utf-8") as f:
                 d = json.load(f)
-            self.steps = d.get("steps", [])
-            if "loops" in d:
-                self.loops.set(str(d["loops"]))
+            if "seqs" in d:
+                self.seqs = d["seqs"]
+            else:
+                self.seqs = [{"name": d.get("name", "Test"),
+                              "loops": str(d.get("loops", 0)),
+                              "steps": d.get("steps", [])}]
+            self.cur = -1
+            self.switch_seq(0, save=False)
+        if a.seq:
+            for i, sq in enumerate(self.seqs):
+                if sq["name"].lower() == a.seq.lower():
+                    self.switch_seq(i, save=False)
         if a.tab:
             self.nb.select({"sequence": 0, "keyboard": 1, "key": 1,
                             "mouse": 2, "clicks": 2,
@@ -832,6 +1028,13 @@ class App:
         # ---------------- Sequence tab
         sq = tk.Frame(self.nb, bg=self.BG, padx=10, pady=10)
         self.nb.add(sq, text=" ▶ Sequence ")
+        top = tk.Frame(sq, bg=self.BG)
+        top.pack(fill="x", pady=(0, 4))
+        self.seq_btn = big_button(top, "", self.open_seq_list, bg="#37474f",
+                                  abg="#455a64", size=14, pady=10)
+        self.seq_btn.pack(side="left", fill="x", expand=True)
+        big_button(top, "➕ New", self.new_seq, bg="#37474f", abg="#455a64",
+                   size=13, pady=10).pack(side="left", padx=(6, 0))
         self._lbl(sq, "Steps run from top to bottom, then start again.",
                   fg="#555").pack(anchor="w")
         fr, self.stree = self._tree(sq, [("n", "#", 36, "center"),
@@ -854,7 +1057,8 @@ class App:
         lr = tk.Frame(sq, bg=self.BG)
         lr.pack(anchor="w", pady=(10, 0))
         self._lbl(lr, "Repeat whole sequence:  ", bold=True).pack(side="left")
-        self.loops = tk.StringVar(value=str(s.get("loops", "0")))
+        self.loops = tk.StringVar(
+            value=str(self.seqs[self.cur].get("loops", "0")))
         NumField(lr, self.loops, step=1).pack(side="left")
         self._lbl(lr, "  times (0 = forever)").pack(side="left")
 
@@ -974,6 +1178,7 @@ class App:
         tk.Label(bot, textvariable=self.count_var, bg=self.BG,
                  font=(FONT, 12, "bold")).pack()
         self._update_start_text()
+        self._update_seq_btn()
         self._fit_window()
 
     def _fit_window(self):
@@ -1005,7 +1210,8 @@ class App:
     def _update_start_text(self):
         if not hasattr(self, "start_btn") or self.running():
             return
-        txt = ("▶  START SEQUENCE" if self.mode() == "sequence"
+        nm = self.seqs[self.cur]["name"] if self.seqs else ""
+        txt = (f"▶  START:  {nm}" if self.mode() == "sequence"
                else "▶  START TIMERS  (Key + Clicks + Links)")
         self.start_btn.config(text=txt, bg=GREEN, activebackground=GREEN_A)
 
@@ -1015,6 +1221,8 @@ class App:
         self._refresh_links()
 
     def _refresh_steps(self, select=None):
+        self._update_seq_btn()
+        self._update_start_text()
         self.stree.delete(*self.stree.get_children())
         for i, st in enumerate(self.steps):
             self.stree.insert("", "end", iid=str(i), values=(
@@ -1054,6 +1262,55 @@ class App:
         return int(s[0]) if s else None
 
     # ---------------------------------------------------------- steps
+    def _sync_loops(self):
+        if hasattr(self, "loops") and 0 <= self.cur < len(self.seqs):
+            self.seqs[self.cur]["loops"] = self.loops.get()
+        return self.seqs
+
+    def _update_seq_btn(self):
+        if hasattr(self, "seq_btn"):
+            sq = self.seqs[self.cur]
+            self.seq_btn.config(text=f"📂  {sq['name']}   "
+                                f"({len(sq['steps'])} steps)   ▾")
+
+    def switch_seq(self, i, save=True):
+        if 0 <= self.cur < len(self.seqs):
+            self._sync_loops()
+        self.cur = i
+        self.steps = self.seqs[i]["steps"]
+        if hasattr(self, "loops"):
+            self.loops.set(str(self.seqs[i].get("loops", "0")))
+        if hasattr(self, "stree"):
+            self._refresh_steps()
+        self._update_seq_btn()
+        self._update_start_text()
+        if save:
+            self._save_settings()
+
+    def open_seq_list(self):
+        if self.running():
+            return
+        i = SeqListDialog(self).run()
+        if i is not None and 0 <= i < len(self.seqs):
+            if i != self.cur:
+                self.switch_seq(i)
+        self._update_seq_btn()
+        if self.args.quit_after_pick:
+            self.close()
+
+    def new_seq(self):
+        if self.running():
+            return
+        names = {s["name"].lower() for s in self.seqs}
+        n = len(self.seqs) + 1
+        while f"sequence {n}" in names:
+            n += 1
+        name = NameDialog(self.root, "New sequence", f"Sequence {n}").run()
+        if name:
+            self.seqs.append({"name": name, "loops": "0", "steps": []})
+            self.switch_seq(len(self.seqs) - 1)
+            self.status.set(f"New sequence '{name}' - now add steps")
+
     def add_step(self):
         if self.running():
             return
@@ -1566,6 +1823,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=["sequence", "timers"], default=None)
     p.add_argument("--seq-file", default="")
+    p.add_argument("--seq", default="", help="sequence name to select")
+    p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--key", default=None)
     p.add_argument("--no-key", action="store_true")
     p.add_argument("--min", type=float, default=None)

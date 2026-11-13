@@ -189,6 +189,17 @@ jobs:
           if ($order -ne "Home,End,End,End") { throw "once step should run only in loop 1" }
           "ONCE/EVERY TEST PASSED"
 
+      - name: Test multiple sequences (select "Beta" by name)
+        shell: pwsh
+        run: |
+          $a = "--mode sequence --seq-file tests\seq_multi.json --seq Beta --start --no-settings --delay 1 --quit-when-done --log $pwd\seqmulti_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          $log = @(Get-Content seqmulti_log.txt); $log
+          $order = ($log | ForEach-Object { $_.Split(' ')[5] }) -join ','
+          "Order: $order"
+          if ($order -ne "End,End") { throw "should run sequence Beta (End x2), not Alpha" }
+          "MULTI SEQUENCE TEST PASSED"
+
       - name: Screenshots (sequence tab, step editor)
         shell: pwsh
         run: |
@@ -200,6 +211,14 @@ jobs:
           $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save("$pwd\kp_sequence.png")
+          $p | Stop-Process
+          Start-Sleep 1
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --open-seq-list" -PassThru
+          Start-Sleep 6
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_seq_list.png")
           $p | Stop-Process
           Start-Sleep 1
           $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --open-step-editor 1" -PassThru
@@ -236,4 +255,5 @@ jobs:
             kp_sequence.png
             kp_step_click.png
             kp_step_key.png
+            kp_seq_list.png
           make_latest: false

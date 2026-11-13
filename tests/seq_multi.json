@@ -1,0 +1,4 @@
+{"seqs": [
+ {"name": "Alpha", "loops": "1", "steps": [{"type": "key", "key": "Home", "times": 1, "amin": 0, "amax": 0}]},
+ {"name": "Beta", "loops": "2", "steps": [{"type": "key", "key": "End", "times": 1, "amin": 0.2, "amax": 0.2}]}
+]}

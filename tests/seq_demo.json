@@ -1,8 +1,110 @@
-{"loops": 0, "steps": [
- {"type": "link", "url": "https://www.youtube.com", "name": "Open YouTube", "run": "once", "amin": 5, "amax": 8},
- {"type": "click", "x": 640, "y": 360, "button": "Left", "times": 1, "tmin": 0, "tmax": 0, "name": "Play video", "run": "every", "amin": 2, "amax": 4},
- {"type": "key", "key": "Right Arrow (next)", "times": 5, "tmin": 0, "tmax": 2, "name": "Skip ahead", "run": "every", "amin": 1, "amax": 1},
- {"type": "click", "x": 900, "y": 200, "button": "Double", "times": 3, "tmin": 1, "tmax": 2, "name": "Like", "run": "every", "amin": 0, "amax": 0},
- {"type": "wait", "name": "Watch", "run": "every", "amin": 10, "amax": 20},
- {"type": "key", "key": "Ctrl+W (close tab)", "times": 1, "tmin": 0, "tmax": 0, "name": "", "run": "every", "amin": 1, "amax": 2}
-]}
+{
+ "seqs": [
+  {
+   "name": "YouTube watch",
+   "loops": "0",
+   "steps": [
+    {
+     "type": "link",
+     "url": "https://www.youtube.com",
+     "name": "Open YouTube",
+     "run": "once",
+     "amin": 5,
+     "amax": 8
+    },
+    {
+     "type": "click",
+     "x": 640,
+     "y": 360,
+     "button": "Left",
+     "times": 1,
+     "tmin": 0,
+     "tmax": 0,
+     "name": "Play video",
+     "run": "every",
+     "amin": 2,
+     "amax": 4
+    },
+    {
+     "type": "key",
+     "key": "Right Arrow (next)",
+     "times": 5,
+     "tmin": 0,
+     "tmax": 2,
+     "name": "Skip ahead",
+     "run": "every",
+     "amin": 1,
+     "amax": 1
+    },
+    {
+     "type": "click",
+     "x": 900,
+     "y": 200,
+     "button": "Double",
+     "times": 3,
+     "tmin": 1,
+     "tmax": 2,
+     "name": "Like",
+     "run": "every",
+     "amin": 0,
+     "amax": 0
+    },
+    {
+     "type": "wait",
+     "name": "Watch",
+     "run": "every",
+     "amin": 10,
+     "amax": 20
+    },
+    {
+     "type": "key",
+     "key": "Ctrl+W (close tab)",
+     "times": 1,
+     "tmin": 0,
+     "tmax": 0,
+     "name": "",
+     "run": "every",
+     "amin": 1,
+     "amax": 2
+    }
+   ]
+  },
+  {
+   "name": "Slideshow next",
+   "loops": "50",
+   "steps": [
+    {
+     "type": "key",
+     "key": "Right Arrow (next)",
+     "times": 1,
+     "name": "Next",
+     "run": "every",
+     "amin": 3,
+     "amax": 6
+    }
+   ]
+  },
+  {
+   "name": "Morning sites",
+   "loops": "1",
+   "steps": [
+    {
+     "type": "link",
+     "url": "https://mail.google.com",
+     "name": "Mail",
+     "run": "every",
+     "amin": 2,
+     "amax": 3
+    },
+    {
+     "type": "link",
+     "url": "https://news.google.com",
+     "name": "News",
+     "run": "every",
+     "amin": 2,
+     "amax": 3
+    }
+   ]
+  }
+ ]
+}
