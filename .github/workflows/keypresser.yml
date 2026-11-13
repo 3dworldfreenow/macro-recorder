@@ -96,6 +96,38 @@ jobs:
           if ($browsers -lt 1) { throw "no browser opened" }
           "LINK TEST PASSED"
 
+      - name: Test touch Pick point (tap at 333,444)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public class M {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
+            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+          }
+          "@
+          [M]::SetProcessDPIAware() | Out-Null
+          Remove-Item dist\KeyPresser\keypresser_settings.json -ErrorAction SilentlyContinue
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--open-picker --quit-after-pick" -PassThru
+          Start-Sleep 7
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\keypresser_pick_screen.png")
+          [M]::SetCursorPos(333, 444) | Out-Null
+          Start-Sleep -Milliseconds 300
+          [M]::mouse_event(2, 0, 0, 0, 0); Start-Sleep -Milliseconds 60; [M]::mouse_event(4, 0, 0, 0, 0)
+          $p | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+          Get-Process KeyPresser -ErrorAction SilentlyContinue | Stop-Process
+          $j = Get-Content dist\KeyPresser\keypresser_settings.json -Raw | ConvertFrom-Json
+          $pt = $j.points[0]
+          "Saved point: X $($pt.x)  Y $($pt.y)  every $($pt.min)-$($pt.max)s"
+          if ($j.points.Count -ne 1 -or $pt.x -ne 333 -or $pt.y -ne 444) { throw "picked point wrong" }
+          "PICK TEST PASSED"
+          Remove-Item dist\KeyPresser\keypresser_settings.json
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -109,4 +141,5 @@ jobs:
             dist1/KeyPresser.exe
             keypresser_screen.png
             keypresser_links_screen.png
+            keypresser_pick_screen.png
           make_latest: false

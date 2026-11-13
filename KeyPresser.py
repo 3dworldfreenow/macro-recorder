@@ -58,6 +58,67 @@ KEYS = {
 CLICK_TYPES = ["Left", "Right", "Double"]
 
 
+def screen_area(root):
+    """Whole desktop (all monitors) as x, y, width, height."""
+    if sys.platform == "win32":
+        try:
+            gm = ctypes.windll.user32.GetSystemMetrics
+            w, h = gm(78), gm(79)
+            if w > 0 and h > 0:
+                return gm(76), gm(77), w, h
+        except Exception:
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def pick_on_screen(root, on_done, hide=()):
+    """Dim the whole screen; the next tap/click gives its position.
+    on_done(x, y) is called, or on_done(None, None) if cancelled."""
+    for w in hide:
+        w.withdraw()
+    x0, y0, w, h = screen_area(root)
+    ov = tk.Toplevel(root)
+    ov.overrideredirect(True)
+    ov.geometry(f"{w}x{h}+{x0}+{y0}")
+    ov.attributes("-topmost", True)
+    try:
+        ov.attributes("-alpha", 0.35)
+    except Exception:
+        pass
+    c = tk.Canvas(ov, bg="black", highlightthickness=0, cursor="crosshair")
+    c.pack(fill="both", expand=True)
+    cx = (root.winfo_screenwidth() // 2) - x0
+    c.create_text(cx, 90, fill="white", font=("Segoe UI", 22, "bold"),
+                  text="Tap (or click) the spot you want clicked")
+    c.create_text(cx, 130, fill="white", font=("Segoe UI", 13),
+                  text="Tap CANCEL below to go back")
+    bx1, by1, bx2, by2 = cx - 90, 165, cx + 90, 215
+    c.create_rectangle(bx1, by1, bx2, by2, fill="#b00", outline="white",
+                       width=2)
+    c.create_text(cx, 190, fill="white", font=("Segoe UI", 16, "bold"),
+                  text="CANCEL")
+
+    def finish(x, y):
+        try:
+            ov.destroy()
+        except Exception:
+            pass
+        for win in hide:
+            win.deiconify()
+        on_done(x, y)
+
+    def tapped(e):
+        if bx1 <= e.x <= bx2 and by1 <= e.y <= by2:
+            finish(None, None)
+        else:
+            finish(e.x_root, e.y_root)
+
+    c.bind("<ButtonPress-1>", tapped)
+    ov.bind("<Escape>", lambda e: finish(None, None))
+    ov.after(50, lambda: (ov.lift(), ov.focus_force()))
+    return ov
+
+
 class PointDialog(tk.Toplevel):
     """Add / edit one click point."""
 
@@ -83,12 +144,27 @@ class PointDialog(tk.Toplevel):
         ttk.Combobox(f, textvariable=self.vars["click"], values=CLICK_TYPES,
                      state="readonly", width=8).grid(row=4, column=1,
                                                      sticky="w")
+        ttk.Button(f, text="Pick on screen", command=self.pick
+                   ).grid(row=0, column=2, rowspan=2, padx=(8, 0), sticky="ns")
         b = ttk.Frame(f)
-        b.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        b.grid(row=5, column=0, columnspan=3, pady=(10, 0))
         ttk.Button(b, text="OK", command=self.ok).pack(side="left", padx=4)
         ttk.Button(b, text="Cancel", command=self.destroy).pack(side="left")
+        self.parent = parent
         self.grab_set()
         self.wait_window()
+
+    def pick(self):
+        self.grab_release()
+
+        def done(x, y):
+            if x is not None:
+                self.vars["x"].set(str(int(x)))
+                self.vars["y"].set(str(int(y)))
+            self.lift()
+            self.grab_set()
+
+        pick_on_screen(self.parent, done, hide=(self, self.parent))
 
     def ok(self):
         try:
@@ -227,6 +303,8 @@ class App:
         root.after(100, self._track_mouse)
         if args.start:
             root.after(300, self.start)
+        if args.open_picker:
+            root.after(800, self.pick_point)
 
     # ------------------------------------------------------------ settings
     def _load_settings(self):
@@ -322,19 +400,20 @@ class App:
                         ("click", "Click", 60), ("every", "Every (sec)", 100)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
-        self.tree.grid(row=0, column=0, rowspan=5, sticky="nsew")
+        self.tree.grid(row=0, column=0, rowspan=6, sticky="nsew")
         mf.columnconfigure(0, weight=1)
         mf.rowconfigure(4, weight=1)
         self.tree.bind("<Double-1>", lambda e: self.edit_point())
-        for i, (t, cmd) in enumerate((("Add (F7)", self.add_point_here),
+        for i, (t, cmd) in enumerate((("➕ Pick point", self.pick_point),
+                                      ("Add at mouse (F7)", self.add_point_here),
                                       ("Edit", self.edit_point),
                                       ("Delete", self.delete_point),
                                       ("Test click", self.test_point))):
-            ttk.Button(mf, text=t, width=11, command=cmd
+            ttk.Button(mf, text=t, width=17, command=cmd
                        ).grid(row=i, column=1, padx=(8, 0), pady=1, sticky="n")
 
         d = ttk.Frame(mf)
-        d.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        d.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(d, text="New points: every").pack(side="left")
         self.pmin = tk.StringVar(value=str(s.get("pmin", "10")))
         self.pmax = tk.StringVar(value=str(s.get("pmax", "20")))
@@ -348,10 +427,10 @@ class App:
         self.restore = tk.BooleanVar(value=s.get("restore", True))
         ttk.Checkbutton(mf, text="Put mouse back where it was after each click",
                         variable=self.restore
-                        ).grid(row=6, column=0, columnspan=2, sticky="w")
+                        ).grid(row=7, column=0, columnspan=2, sticky="w")
         self.mouse_pos = tk.StringVar(value="Mouse now: -")
         ttk.Label(mf, textvariable=self.mouse_pos, foreground="#06c"
-                  ).grid(row=7, column=0, columnspan=2, sticky="w",
+                  ).grid(row=8, column=0, columnspan=2, sticky="w",
                          pady=(4, 0))
 
         # --- links tab
@@ -407,7 +486,8 @@ class App:
             value="Key presses: 0 · Clicks: 0 · Links opened: 0")
         ttk.Label(main, textvariable=self.count_var,
                   font=("Segoe UI", 11, "bold")).pack(pady=2)
-        ttk.Label(main, text="F7 add point at mouse · F8 start/stop · ESC stop",
+        ttk.Label(main, text="Touch: tap Start / Stop · Keyboard: F7 add point, "
+                  "F8 start/stop, ESC stop",
                   foreground="#777").pack()
 
     def _refresh_points(self):
@@ -476,10 +556,28 @@ class App:
         s = self.tree.selection()
         return int(s[0]) if s else None
 
+    def pick_point(self):
+        """Touch friendly: dim the screen and let the user tap the spot."""
+        if self.running():
+            return
+
+        def done(x, y):
+            if x is None:
+                self.status.set("Pick cancelled")
+            else:
+                self.add_point_at(x, y)
+            if self.args.quit_after_pick:
+                self.close()
+
+        pick_on_screen(self.root, done, hide=(self.root,))
+
     def add_point_here(self):
         if self.running():
             return
         x, y = self.msc.position
+        self.add_point_at(x, y)
+
+    def add_point_at(self, x, y):
         try:
             a, b = float(self.pmin.get()), float(self.pmax.get())
         except ValueError:
@@ -713,6 +811,8 @@ def main():
                    help="X,Y,MIN,MAX  (can repeat)")
     p.add_argument("--link", action="append",
                    help="URL (once) or URL|MIN|MAX (repeat); can repeat")
+    p.add_argument("--open-picker", action="store_true")
+    p.add_argument("--quit-after-pick", action="store_true")
     p.add_argument("--tab", default="", help="keyboard / mouse / links")
     p.add_argument("--run-for", type=float, default=0,
                    help="stop after this many seconds")
