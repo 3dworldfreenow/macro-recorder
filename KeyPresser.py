@@ -1001,10 +1001,10 @@ class App:
         sb.pack(side="right", fill="y")
         return fr, tv
 
-    def _btn_row(self, master, items, cols=4):
+    def _btn_row(self, master, items, cols=4, size=12):
         fr = tk.Frame(master, bg=self.BG)
         for i, (text, cmd) in enumerate(items):
-            soft_button(fr, text, cmd).grid(row=i // cols, column=i % cols,
+            soft_button(fr, text, cmd, size=size, padx=4).grid(row=i // cols, column=i % cols,
                                             sticky="ew", padx=3, pady=3)
         for c in range(cols):
             fr.columnconfigure(c, weight=1, uniform="b")
@@ -1052,8 +1052,8 @@ class App:
                            ("▲ Up", lambda: self.move_step(-1)),
                            ("▼ Down", lambda: self.move_step(1)),
                            ("⧉ Copy", self.copy_step),
-                           ("▶ Test step", self.test_step)],
-                      cols=3).pack(fill="x")
+                           ("▶ Test", self.test_step)],
+                      cols=6, size=11).pack(fill="x")
         lr = tk.Frame(sq, bg=self.BG)
         lr.pack(anchor="w", pady=(10, 0))
         self._lbl(lr, "Repeat whole sequence:  ", bold=True).pack(side="left")
@@ -1196,7 +1196,7 @@ class App:
                 pass
             for tv in (self.stree, self.tree, self.ltree):
                 cur = int(tv.cget("height"))
-                tv.configure(height=max(2, cur - (over + rowh - 1) // rowh))
+                tv.configure(height=max(1, cur - (over + rowh - 1) // rowh))
             r.update_idletasks()
         w = min(max(r.winfo_reqwidth(), 560), sw - 20)
         h = min(r.winfo_reqheight(), sh - 90)
