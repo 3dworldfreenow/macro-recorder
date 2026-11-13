@@ -118,20 +118,74 @@ def open_link(url):
         webbrowser.open(url, new=2)
 
 
+def _guid(text):
+    import uuid
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_ulong), ("d2", ctypes.c_ushort),
+                    ("d3", ctypes.c_ushort), ("d4", ctypes.c_ubyte * 8)]
+
+    u = uuid.UUID(text)
+    g = GUID()
+    g.d1, g.d2, g.d3 = u.fields[0], u.fields[1], u.fields[2]
+    for i, b in enumerate(u.bytes[8:]):
+        g.d4[i] = b
+    return g
+
+
+def _tabtip_toggle():
+    """Ask the Windows touch keyboard to show/hide (ITipInvocation.Toggle).
+    Returns True if it worked."""
+    try:
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        clsid = _guid("4ce576fa-83dc-4f88-951c-9d0782b4e376")
+        iid = _guid("37c994e7-432b-4834-a2f7-dce1f13b834b")
+        ptr = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 4,
+                                    ctypes.byref(iid), ctypes.byref(ptr))
+        if hr != 0 or not ptr.value:
+            return False
+        vt = ctypes.cast(ptr, ctypes.POINTER(
+            ctypes.POINTER(ctypes.c_void_p)))[0]
+        toggle = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                    ctypes.c_void_p)(vt[3])
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vt[2])
+        hr = toggle(ptr, ctypes.windll.user32.GetDesktopWindow())
+        release(ptr)
+        return hr == 0
+    except Exception:
+        return False
+
+
 def open_touch_keyboard():
-    """Show Windows' on-screen keyboard."""
+    """Show Windows' on-screen keyboard (touch keyboard, else osk)."""
+    if sys.platform != "win32":
+        return
+    if _tabtip_toggle():
+        return
     tabtip = (r"C:\Program Files\Common Files\microsoft shared\ink"
               r"\TabTip.exe")
     try:
         if os.path.exists(tabtip):
             os.startfile(tabtip)
-            return
+            time.sleep(0.6)
+            if _tabtip_toggle():
+                return
     except Exception:
         pass
     try:
         subprocess.Popen(["osk.exe"], shell=True)
     except Exception:
         pass
+
+
+def keyboard_button(master, bg="#5e35b1", abg="#7e57c2", size=13):
+    return tk.Button(master, text="⌨  Keyboard", command=open_touch_keyboard,
+                     bg=bg, fg="white", activebackground=abg,
+                     activeforeground="white", bd=0, relief="flat",
+                     font=("Segoe UI", size, "bold"), padx=16, pady=8,
+                     cursor="hand2", takefocus=0)
 
 
 def screen_area(root):
@@ -312,6 +366,9 @@ class Dialog(tk.Toplevel):
         self.result = None
         self.foot = tk.Frame(self, bg=self.BG, padx=16, pady=12)
         self.foot.pack(side="bottom", fill="x")    # OK/Cancel always visible
+        topbar = tk.Frame(self, bg=self.BG, padx=16, pady=(8))
+        topbar.pack(side="top", fill="x")
+        keyboard_button(topbar, size=12).pack(side="right")
         # scrollable body (drag with a finger, scrollbar or mouse wheel)
         self.vsb = ttk.Scrollbar(self, orient="vertical")
         self.canvas = tk.Canvas(self, bg=self.BG, highlightthickness=0,
@@ -878,6 +935,8 @@ class App:
             root.after(400, self.start)
         if args.open_picker:
             root.after(800, self.pick_point)
+        if args.show_keyboard:
+            root.after(1500, open_touch_keyboard)
         if args.open_seq_list:
             root.after(800, self.open_seq_list)
         if args.open_step_editor is not None:
@@ -1020,6 +1079,11 @@ class App:
 
         bot = tk.Frame(r, bg=self.BG, padx=10, pady=8)
         bot.pack(side="bottom", fill="x")      # always visible
+        topbar = tk.Frame(r, bg=self.BG, padx=8, pady=6)
+        topbar.pack(side="top", fill="x")
+        tk.Label(topbar, text="KeyPresser", bg=self.BG, fg="#37474f",
+                 font=(FONT, 14, "bold")).pack(side="left")
+        keyboard_button(topbar).pack(side="right")
         self.nb = ttk.Notebook(r)
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         self.nb.bind("<<NotebookTabChanged>>",
@@ -1825,6 +1889,7 @@ def main():
     p.add_argument("--seq-file", default="")
     p.add_argument("--seq", default="", help="sequence name to select")
     p.add_argument("--open-seq-list", action="store_true")
+    p.add_argument("--show-keyboard", action="store_true")
     p.add_argument("--key", default=None)
     p.add_argument("--no-key", action="store_true")
     p.add_argument("--min", type=float, default=None)

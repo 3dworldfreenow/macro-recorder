@@ -237,6 +237,24 @@ jobs:
           $bmp.Save("$pwd\kp_step_key.png")
           $p | Stop-Process
 
+      - name: Test Keyboard button (opens on-screen keyboard)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --show-keyboard" -PassThru
+          Start-Sleep 9
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_keyboard.png")
+          $k = @(Get-Process TabTip, osk, TextInputHost -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName)
+          "Keyboard processes: $($k -join ', ')"
+          $p | Stop-Process
+          Get-Process osk -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($k.Count -eq 0) { throw "no on-screen keyboard process started" }
+          "KEYBOARD TEST PASSED"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -256,4 +274,5 @@ jobs:
             kp_step_click.png
             kp_step_key.png
             kp_seq_list.png
+            kp_keyboard.png
           make_latest: false
