@@ -1,0 +1,5 @@
+{"loops": 2, "steps": [
+ {"type": "click", "x": 800, "y": 420, "button": "Left", "times": 3, "tmin": 0.5, "tmax": 0.5, "amin": 1, "amax": 1},
+ {"type": "key", "key": "Right Arrow (next)", "times": 2, "tmin": 0.3, "tmax": 0.3, "amin": 0.5, "amax": 0.5},
+ {"type": "wait", "amin": 1.5, "amax": 1.5}
+]}

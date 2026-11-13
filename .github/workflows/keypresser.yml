@@ -2,7 +2,7 @@ name: Build KeyPresser
 
 on:
   push:
-    paths: ["KeyPresser.py", "tests/keytest.ps1", ".github/workflows/keypresser.yml"]
+    paths: ["KeyPresser.py", "tests/**", ".github/workflows/keypresser.yml"]
   workflow_dispatch:
 
 permissions:
@@ -31,7 +31,7 @@ jobs:
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           Start-Process pwsh -ArgumentList "-NoProfile -File tests\keytest.ps1"
           Start-Sleep 6
-          $a = "--start --no-settings --delay 4 --min 0 --max 2 --point 800,420,1,2 --point 700,480,2,3 --run-for 14 --quit-when-done --log $pwd\presser_log.txt"
+          $a = "--mode timers --start --no-settings --delay 4 --min 0 --max 2 --point 800,420,1,2 --point 700,480,2,3 --run-for 14 --quit-when-done --log $pwd\presser_log.txt"
           $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
           Start-Sleep 3
           $ws = New-Object -ComObject WScript.Shell
@@ -69,11 +69,10 @@ jobs:
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $a = "--start --no-settings --no-key --tab links --delay 1 --link example.com --link https://example.org|3|4 --run-for 13 --quit-when-done --log $pwd\links_log.txt"
+          $a = "--mode timers --start --no-settings --no-key --tab links --delay 1 --link example.com --link https://example.org|3|4 --run-for 13 --quit-when-done --log $pwd\links_log.txt"
           $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
           Start-Sleep 9
           $ws = New-Object -ComObject WScript.Shell
-          $ws.AppActivate("KeyPresser") | Out-Null
           Start-Sleep 1
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
@@ -128,6 +127,86 @@ jobs:
           "PICK TEST PASSED"
           Remove-Item dist\KeyPresser\keypresser_settings.json
 
+      - name: Test sequence (click x3 -> key x2 -> wait, 2 loops)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item keytest_received.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\keytest.ps1"
+          Start-Sleep 6
+          $a = "--mode sequence --seq-file tests\seq_test.json --start --no-settings --delay 3 --quit-when-done --log $pwd\seq_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          Start-Sleep 2
+          (New-Object -ComObject WScript.Shell).AppActivate("KeyTest") | Out-Null
+          Start-Sleep 3
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_running.png")
+          $p | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          Get-Process KeyPresser -ErrorAction SilentlyContinue | Stop-Process
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "KeyTest" } | Stop-Process
+          "--- sequence log"; Get-Content seq_log.txt
+          $log = @(Get-Content seq_log.txt)
+          $kinds = ($log | ForEach-Object { $_.Split(' ')[4] }) -join ','
+          "Order: $kinds"
+          $want = "click,click,click,key,key,click,click,click,key,key"
+          if ($kinds -ne $want) { throw "wrong order" }
+          $t = $log | ForEach-Object { [double]($_.Split(' ')[0]) }
+          $g = for ($i = 1; $i -lt $t.Count; $i++) { [math]::Round($t[$i] - $t[$i-1], 2) }
+          "Gaps: $($g -join ', ')"
+          # expected: 0.5,0.5 | 1.0 | 0.3 | 0.5+1.5=2.0 | 0.5,0.5 | 1.0 | 0.3
+          $exp = 0.5,0.5,1.0,0.3,2.0,0.5,0.5,1.0,0.3
+          for ($i = 0; $i -lt $exp.Count; $i++) { if ($g[$i] -lt $exp[$i] - 0.05 -or $g[$i] -gt $exp[$i] + 0.45) { throw "gap $i = $($g[$i]) expected ~$($exp[$i])" } }
+          $recv = @(Get-Content keytest_received.txt)
+          $c = @($recv | Where-Object { $_ -match "^Click \d+ 800 420$" }).Count
+          $k = @($recv | Where-Object { $_ -like "Right *" }).Count
+          "Test window got: $c clicks at 800,420 and $k Right keys"
+          if ($c -ne 6 -or $k -ne 4) { throw "test window did not get 6 clicks + 4 keys" }
+          "SEQUENCE TEST PASSED"
+
+      - name: Test sequence with link (2 loops, 2 s apart)
+        shell: pwsh
+        run: |
+          $a = "--mode sequence --seq-file tests\seq_link.json --start --no-settings --delay 1 --quit-when-done --log $pwd\seqlink_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          $log = @(Get-Content seqlink_log.txt); $log
+          if ($log.Count -ne 2 -or $log[0] -notmatch "link https://example.com$") { throw "link step did not run twice" }
+          $gap = [math]::Round([double]$log[1].Split(' ')[0] - [double]$log[0].Split(' ')[0], 2)
+          "Gap: $gap"
+          if ($gap -lt 1.95 -or $gap -gt 2.6) { throw "link gap wrong" }
+          "SEQUENCE LINK TEST PASSED"
+
+      - name: Screenshots (sequence tab, step editor)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --tab sequence" -PassThru
+          Start-Sleep 6
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_sequence.png")
+          $p | Stop-Process
+          Start-Sleep 1
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --open-step-editor 1" -PassThru
+          Start-Sleep 6
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_step_click.png")
+          $p | Stop-Process
+          Start-Sleep 1
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file tests\seq_demo.json --open-step-editor 2" -PassThru
+          Start-Sleep 6
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_step_key.png")
+          $p | Stop-Process
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -142,4 +221,8 @@ jobs:
             keypresser_screen.png
             keypresser_links_screen.png
             keypresser_pick_screen.png
+            kp_running.png
+            kp_sequence.png
+            kp_step_click.png
+            kp_step_key.png
           make_latest: false
