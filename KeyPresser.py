@@ -751,7 +751,7 @@ class SeqListDialog(Dialog):
                            ("steps", "Steps", 80, "center"),
                            ("rep", "Repeat", 100, "center")):
             self.tv.heading(c, text=t)
-            self.tv.column(c, width=w, anchor=a)
+            self.tv.column(c, width=sz(w), anchor=a)
         sb = ttk.Scrollbar(fr, orient="vertical", command=self.tv.yview)
         self.tv.configure(yscrollcommand=sb.set)
         self.tv.pack(side="left", fill="both", expand=True)
@@ -1069,7 +1069,7 @@ class App:
                           height=height, selectmode="browse")
         for cid, text, w, anchor in cols:
             tv.heading(cid, text=text)
-            tv.column(cid, width=w, anchor=anchor,
+            tv.column(cid, width=sz(w), minwidth=sz(30), anchor=anchor,
                       stretch=(anchor == "w"))
         sb = ttk.Scrollbar(fr, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
