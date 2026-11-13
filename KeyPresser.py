@@ -121,7 +121,14 @@ def pick_on_screen(root, on_done, hide=()):
 
     c.bind("<ButtonPress-1>", tapped)
     ov.bind("<Escape>", lambda e: finish(None, None))
-    ov.after(50, lambda: (ov.lift(), ban.lift(), ov.focus_force()))
+    def raise_banner():
+        ov.focus_force()
+        ban.attributes("-topmost", False)
+        ban.attributes("-topmost", True)
+        ban.lift(ov)
+
+    ov.after(50, raise_banner)
+    ov.after(400, raise_banner)
     return ov
 
 
