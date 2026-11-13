@@ -920,6 +920,10 @@ class App:
         self.root, self.args = root, args
         self.q = queue.Queue()
         self.stop = threading.Event()
+        self.pause = threading.Event()        # set = paused
+        self.paused_total = 0.0
+        self.pause_started = 0.0
+        self.pause_btns = []
         self.worker = None
         self.kbc = keyboard.Controller()
         self.msc = mouse.Controller()
@@ -949,6 +953,10 @@ class App:
             root.after(400, self.start)
         if args.open_picker:
             root.after(800, self.pick_point)
+        if args.pause_at:
+            root.after(int(args.pause_at * 1000), self.toggle_pause)
+            root.after(int((args.pause_at + args.pause_for) * 1000),
+                       self.toggle_pause)
         if args.show_keyboard:
             root.after(1500, open_touch_keyboard)
         if args.open_seq_list:
@@ -1251,9 +1259,17 @@ class App:
         Toggle(row, "Small Stop button while running", self.hide
                ).pack(side="left", padx=(10, 0), fill="x", expand=True)
 
-        self.start_btn = big_button(bot, "", self.toggle, bg=GREEN,
+        sr = tk.Frame(bot, bg=self.BG)
+        sr.pack(fill="x", pady=(8, 4))
+        self.start_btn = big_button(sr, "", self.toggle, bg=GREEN,
                                     abg=GREEN_A, size=17, pady=14)
-        self.start_btn.pack(fill="x", pady=(8, 4))
+        self.start_btn.pack(side="left", fill="x", expand=True)
+        self.pause_btn = big_button(sr, "⏸  PAUSE", self.toggle_pause,
+                                    bg="#ef6c00", abg="#fb8c00", size=15,
+                                    pady=14)
+        self.pause_btns = [self.pause_btn]
+        if self.running():
+            self.pause_btn.pack(side="left", padx=(6, 0))
         self.status = tk.StringVar(value="Ready")
         tk.Label(bot, textvariable=self.status, bg=self.BG, fg=GREEN,
                  font=(FONT, sz(12))).pack()
@@ -1578,6 +1594,7 @@ class App:
     def do_click(self, x, y, kind, restore):
         """Click at x, y. If the small Stop window is in the way, hide it
         for a moment."""
+        self.gate()
         r = self.mini_rect
         covered = r and r[0] <= x <= r[2] and r[1] <= y <= r[3]
         if covered:
@@ -1601,6 +1618,7 @@ class App:
 
     def press_key(self, name):
         keys = KEYS.get(name, (Key.right,))
+        self.gate()
         self.sending = True
         try:
             for k in keys:
@@ -1621,6 +1639,8 @@ class App:
     def _on_key(self, key):
         if key == Key.f8:
             self.q.put(("toggle", None))
+        elif key == Key.f9:
+            self.q.put(("pause", None))
         elif key == Key.f7:
             self.q.put(("addpoint", None))
         elif key == Key.esc and not self.sending:
@@ -1671,6 +1691,10 @@ class App:
 
     def _launch(self, target):
         self.stop.clear()
+        self.pause.clear()
+        self.paused_total = 0.0
+        self.pause_btn.pack(side="left", padx=(6, 0))
+        self._draw_pause_btns()
         self.worker = threading.Thread(target=target, daemon=True)
         self.worker.start()
         self.start_btn.config(text="■  STOP", bg=RED, activebackground=RED_A)
@@ -1691,8 +1715,15 @@ class App:
                                     fg="white", font=(FONT, sz(10)),
                                     wraplength=sz(210), justify="center")
         self.mini_status.pack(padx=8)
-        big_button(m, "■  STOP", self.stop.set, bg=RED, abg=RED_A,
-                   size=16, padx=34, pady=12).pack(padx=8, pady=8)
+        br = tk.Frame(m, bg="#263238")
+        br.pack(padx=8, pady=8)
+        pb = big_button(br, "⏸  PAUSE", self.toggle_pause, bg="#ef6c00",
+                        abg="#fb8c00", size=14, padx=14, pady=12)
+        pb.pack(side="left", padx=(0, 6))
+        self.pause_btns.append(pb)
+        big_button(br, "■  STOP", self.stop.set, bg=RED, abg=RED_A,
+                   size=14, padx=18, pady=12).pack(side="left")
+        self._draw_pause_btns()
         m.update_idletasks()
         w = max(sz(230), m.winfo_reqwidth())
         x = self.root.winfo_screenwidth() - w - 20
@@ -1729,16 +1760,58 @@ class App:
             self.root.deiconify()
 
     # timing helpers ---------------------------------------------------
+    def vnow(self):
+        """Clock that stands still while paused."""
+        now = time.perf_counter()
+        p = self.paused_total
+        if self.pause.is_set():
+            p += now - self.pause_started
+        return now - p
+
+    def gate(self):
+        """Block here while paused."""
+        while self.pause.is_set() and not self.stop.is_set():
+            time.sleep(0.05)
+
     def wait_until(self, t):
         while not self.stop.is_set():
-            left = t - time.perf_counter()
+            if self.pause.is_set():
+                time.sleep(0.05)
+                continue
+            left = t - self.vnow()
             if left <= 0:
                 return True
             time.sleep(min(left, 0.01))
         return False
 
     def wait(self, secs):
-        return self.wait_until(time.perf_counter() + max(0.0, secs))
+        return self.wait_until(self.vnow() + max(0.0, secs))
+
+    def toggle_pause(self):
+        if not self.running():
+            return
+        if self.pause.is_set():
+            self.paused_total += time.perf_counter() - self.pause_started
+            self.pause.clear()
+            msg = "▶ Resumed"
+        else:
+            self.pause_started = time.perf_counter()
+            self.pause.set()
+            msg = "⏸ Paused - tap Resume to continue"
+        self.status.set(msg)
+        if self.mini:
+            self.mini_status.config(text=msg)
+        self._draw_pause_btns()
+
+    def _draw_pause_btns(self):
+        paused = self.pause.is_set()
+        for b in list(self.pause_btns):
+            try:
+                b.config(text="▶  RESUME" if paused else "⏸  PAUSE",
+                         bg=GREEN if paused else "#ef6c00",
+                         activebackground=GREEN_A if paused else "#fb8c00")
+            except Exception:
+                self.pause_btns.remove(b)
 
     def countdown(self, n):
         for s in range(n, 0, -1):
@@ -1794,6 +1867,7 @@ class App:
                             self.wait(random.uniform(st.get("tmin", 0),
                                                      st.get("tmax", 0)))
                 elif t == "link":
+                    self.gate()
                     open_link(st["url"])
                     n["link"] += 1
                     self.log(f"seq {loop} {i + 1} link {st['url']}")
@@ -1812,7 +1886,7 @@ class App:
         if not self.countdown(cfg["delay"]):
             self.q.put(("finished", "Stopped"))
             return
-        start = time.perf_counter()
+        start = self.vnow()
         deadline = start + cfg["run_for"] if cfg["run_for"] else None
         tasks = []
         if cfg["key_on"]:
@@ -1838,17 +1912,18 @@ class App:
                 if cfg["limit"] and n["key"] >= cfg["limit"]:
                     tasks.remove(t)
                 else:
-                    t["next"] = time.perf_counter() + random.uniform(
+                    t["next"] = self.vnow() + random.uniform(
                         cfg["kmin"], cfg["kmax"])
             elif t["kind"] == "link":
                 l = t["l"]
+                self.gate()
                 open_link(l["url"])
                 n["link"] += 1
                 self.log(f"link {t['i'] + 1} {l['url']}")
                 if l["mode"] == "once":
                     tasks.remove(t)
                 else:
-                    t["next"] = time.perf_counter() + random.uniform(
+                    t["next"] = self.vnow() + random.uniform(
                         l["min"], l["max"])
             else:
                 p = t["p"]
@@ -1856,7 +1931,7 @@ class App:
                               cfg["restore"])
                 n["click"] += 1
                 self.log(f"click {t['i'] + 1} {p['x']} {p['y']}")
-                t["next"] = time.perf_counter() + random.uniform(p["min"],
+                t["next"] = self.vnow() + random.uniform(p["min"],
                                                                  p["max"])
             self.q.put(("count", n))
         done = (f"{n['key']} key presses, {n['click']} clicks, "
@@ -1894,7 +1969,11 @@ class App:
                     if self.logfile:
                         self.logfile.write(f"{time.time():.3f} {val}\n")
                         self.logfile.flush()
+                elif msg == "pause":
+                    self.toggle_pause()
                 elif msg == "finished":
+                    self.pause.clear()
+                    self.pause_btn.pack_forget()
                     self.close_mini()
                     self.status.set(val)
                     self._update_start_text()
@@ -1931,6 +2010,8 @@ def main():
     p.add_argument("--seq", default="", help="sequence name to select")
     p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--show-keyboard", action="store_true")
+    p.add_argument("--pause-at", type=float, default=0)
+    p.add_argument("--pause-for", type=float, default=0)
     p.add_argument("--ui-size", choices=list(SIZES), default=None)
     p.add_argument("--key", default=None)
     p.add_argument("--no-key", action="store_true")

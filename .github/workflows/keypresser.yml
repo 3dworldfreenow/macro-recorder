@@ -271,6 +271,45 @@ jobs:
           if ($k.Count -eq 0) { throw "no on-screen keyboard process started" }
           "KEYBOARD TEST PASSED"
 
+      - name: Test pause / resume (sequence, pause 3 s)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $a = "--mode sequence --seq-file tests\seq_pause.json --start --no-settings --delay 1 --pause-at 3 --pause-for 3 --quit-when-done --log $pwd\pause_seq_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          Start-Sleep 4.5
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_paused.png")
+          $p | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          $log = @(Get-Content pause_seq_log.txt); "presses: $($log.Count)"
+          $t = $log | ForEach-Object { [double]($_.Split(' ')[0]) }
+          $g = for ($i = 1; $i -lt $t.Count; $i++) { [math]::Round($t[$i] - $t[$i-1], 2) }
+          "Gaps: $($g -join ', ')"
+          $big = @($g | Where-Object { $_ -gt 1.5 })
+          if ($big.Count -ne 1) { throw "expected exactly one long gap (the pause)" }
+          if ($big[0] -lt 2.9 -or $big[0] -gt 4.3) { throw "pause gap wrong: $($big[0])" }
+          foreach ($x in $g) { if ($x -lt 0.4) { throw "presses bunched up after resume: $x" } }
+          if ($log.Count -ne 10) { throw "should still do all 10 presses" }
+          "PAUSE SEQUENCE TEST PASSED"
+
+      - name: Test pause / resume (timers, pause 3 s)
+        shell: pwsh
+        run: |
+          $a = "--mode timers --start --no-settings --delay 1 --min 0.5 --max 0.5 --run-for 5 --pause-at 3 --pause-for 3 --quit-when-done --log $pwd\pause_tim_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          $log = @(Get-Content pause_tim_log.txt); "presses: $($log.Count)"
+          $t = $log | ForEach-Object { [double]($_.Split(' ')[0]) }
+          $g = for ($i = 1; $i -lt $t.Count; $i++) { [math]::Round($t[$i] - $t[$i-1], 2) }
+          "Gaps: $($g -join ', ')"
+          $big = @($g | Where-Object { $_ -gt 1.5 })
+          if ($big.Count -ne 1) { throw "expected exactly one long gap (the pause)" }
+          if ($big[0] -lt 2.9 -or $big[0] -gt 4.3) { throw "pause gap wrong: $($big[0])" }
+          foreach ($x in $g) { if ($x -lt 0.4) { throw "presses bunched up after resume: $x" } }
+          if ($log.Count -lt 9 -or $log.Count -gt 12) { throw "timer count wrong" }
+          "PAUSE TIMERS TEST PASSED"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -291,6 +330,7 @@ jobs:
             kp_step_key.png
             kp_seq_list.png
             kp_keyboard.png
+            kp_paused.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
