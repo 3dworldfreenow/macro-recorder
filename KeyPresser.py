@@ -19,8 +19,12 @@ ESC stop.
 Needs: pip install pynput
 """
 
+import sys as _sys
+_sys.coinit_flags = 0          # comtypes: use a multithreaded COM apartment
+
 import argparse
 import ctypes
+import re
 import json
 import os
 import queue
@@ -271,6 +275,191 @@ def pick_on_screen(root, on_done, hide=()):
 
 
 # ====================================================================
+# reading text on screen (Windows text first, then Windows OCR)
+# ====================================================================
+def _grab_bgra(x, y, w, h, scale=1):
+    """Screen pixels of a box as BGRA bytes (no extra libraries)."""
+    from ctypes import wintypes as wt
+    u, g = ctypes.windll.user32, ctypes.windll.gdi32
+    u.GetDC.restype = wt.HDC
+    u.GetDC.argtypes = [wt.HWND]
+    u.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
+    g.CreateCompatibleDC.restype = wt.HDC
+    g.CreateCompatibleDC.argtypes = [wt.HDC]
+    g.CreateCompatibleBitmap.restype = wt.HBITMAP
+    g.CreateCompatibleBitmap.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int]
+    g.SelectObject.restype = wt.HGDIOBJ
+    g.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+    g.StretchBlt.argtypes = [wt.HDC] + [ctypes.c_int] * 4 + [wt.HDC] + \
+        [ctypes.c_int] * 4 + [wt.DWORD]
+    g.SetStretchBltMode.argtypes = [wt.HDC, ctypes.c_int]
+    g.GetDIBits.argtypes = [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT,
+                            ctypes.c_void_p, ctypes.c_void_p, wt.UINT]
+    g.DeleteObject.argtypes = [wt.HGDIOBJ]
+    g.DeleteDC.argtypes = [wt.HDC]
+
+    class BMIH(ctypes.Structure):
+        _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16),
+                    ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32),
+                    ("biXPelsPerMeter", ctypes.c_int32),
+                    ("biYPelsPerMeter", ctypes.c_int32),
+                    ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32)]
+
+    W, H = int(w * scale), int(h * scale)
+    sdc = u.GetDC(None)
+    mdc = g.CreateCompatibleDC(sdc)
+    bmp = g.CreateCompatibleBitmap(sdc, W, H)
+    old = g.SelectObject(mdc, bmp)
+    g.SetStretchBltMode(mdc, 4)                      # HALFTONE = smooth
+    g.StretchBlt(mdc, 0, 0, W, H, sdc, int(x), int(y), int(w), int(h),
+                 0x00CC0020)                          # SRCCOPY
+    bi = BMIH()
+    bi.biSize, bi.biWidth, bi.biHeight = ctypes.sizeof(BMIH), W, -H
+    bi.biPlanes, bi.biBitCount, bi.biCompression = 1, 32, 0
+    buf = ctypes.create_string_buffer(W * H * 4)
+    g.GetDIBits(mdc, bmp, 0, H, buf, ctypes.byref(bi), 0)
+    g.SelectObject(mdc, old)
+    g.DeleteObject(bmp)
+    g.DeleteDC(mdc)
+    u.ReleaseDC(None, sdc)
+    return buf.raw, W, H
+
+
+def _ocr_text(x, y, w, h):
+    """Windows built-in OCR (Windows 10/11)."""
+    import asyncio
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.graphics.imaging import (SoftwareBitmap,
+                                                BitmapPixelFormat,
+                                                BitmapAlphaMode)
+    from winrt.windows.storage.streams import DataWriter
+    eng = OcrEngine.try_create_from_user_profile_languages()
+    if eng is None:
+        raise RuntimeError("Windows OCR is not available (add a language "
+                           "in Windows settings)")
+    big = max(w, h)
+    scale = 2 if big * 2 <= 2500 else 1     # bigger text reads better
+    data, W, H = _grab_bgra(x, y, w, h, scale)
+    dw = DataWriter()
+    dw.write_bytes(data)
+    sb = SoftwareBitmap.create_copy_from_buffer(
+        dw.detach_buffer(), BitmapPixelFormat.BGRA8, W, H,
+        BitmapAlphaMode.IGNORE)
+
+    async def run():
+        return await eng.recognize_async(sb)
+
+    return (asyncio.run(run()).text or "").strip()
+
+
+def _uia_text(x, y):
+    """Text Windows reports for the button / label / box at the point."""
+    import comtypes
+    import comtypes.client
+    try:
+        from comtypes.gen import UIAutomationClient as UIA
+    except ImportError:
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen import UIAutomationClient as UIA
+    uia = comtypes.client.CreateObject(UIA.CUIAutomation,
+                                       interface=UIA.IUIAutomation)
+    el = uia.ElementFromPoint(UIA.tagPOINT(int(x), int(y)))
+    parts = []
+    try:
+        if el.CurrentName:
+            parts.append(el.CurrentName.strip())
+    except Exception:
+        pass
+    try:
+        vp = el.GetCurrentPattern(10002)                 # ValuePattern
+        if vp:
+            v = vp.QueryInterface(UIA.IUIAutomationValuePattern).CurrentValue
+            if v and v.strip() and v.strip() not in parts:
+                parts.append(v.strip())
+    except Exception:
+        pass
+    return " ".join(p for p in parts if p)
+
+
+def read_screen_text(method, x, y, w, h, want=None):
+    """Read text at / around (x, y).
+    method: 'auto' (Windows text, then OCR), 'uia' or 'ocr'.
+    want: optional function(text)->bool; in auto mode OCR is also tried
+    when the Windows text doesn't match.
+    Returns (text, source, error)."""
+    out = {"text": "", "src": "", "err": ""}
+
+    def work():
+        try:
+            import comtypes
+            comtypes.CoInitializeEx(0)
+        except Exception:
+            pass
+        order = {"uia": ["uia"], "ocr": ["ocr"]}.get(method, ["uia", "ocr"])
+        errs = []
+        for m in order:
+            try:
+                if m == "uia":
+                    t = _uia_text(x, y)
+                else:
+                    t = _ocr_text(int(x - w / 2), int(y - h / 2), int(w),
+                                  int(h))
+            except Exception as e:
+                errs.append(f"{m}: {e}")
+                continue
+            if t:
+                out["text"], out["src"] = t, m
+                if want is None or want(t):
+                    break
+        if not out["text"] and errs:
+            out["err"] = "; ".join(errs)
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(15)
+    return out["text"], out["src"], out["err"]
+
+
+NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def text_matches(st, text):
+    """Does text satisfy the step's rule?"""
+    mode = st.get("mmode", "contains")
+    pat = st.get("pattern", "")
+    text = text or ""
+    if mode == "contains":
+        return pat.lower() in text.lower() if pat else bool(text.strip())
+    if mode == "equals":
+        return " ".join(text.split()).lower() == " ".join(pat.split()).lower()
+    if mode == "regex":
+        try:
+            return re.search(pat, text, re.I) is not None
+        except re.error:
+            return False
+    if mode == "number":
+        m = NUM_RE.search(text)
+        if not m:
+            return False
+        try:
+            v = float(m.group().replace(",", ""))
+        except ValueError:
+            return False
+        n = fnum(st.get("num", 0))
+        op = st.get("op", "=")
+        return {"=": v == n, ">": v > n, "<": v < n, "≥": v >= n,
+                "≤": v <= n}.get(op, False)
+    return False
+
+
+ACTIONS = ["Continue", "Go to step", "Next loop", "Stop"]
+
+
+# ====================================================================
 # touch widgets
 # ====================================================================
 def big_button(master, text, command, bg=BLUE, abg="#1976d2", size=13,
@@ -502,9 +691,26 @@ class StepDialog(Dialog):
         super().__init__(parent, "Step")
         s = dict(step)
         self.type = tk.StringVar(value={"click": "🖱 Click", "key": "⌨ Key",
-                                        "link": "🔗 Link",
-                                        "wait": "⏱ Wait"}[s.get("type",
-                                                                "click")])
+                                        "link": "🔗 Link", "wait": "⏱ Wait",
+                                        "read": "🔍 Read"}[s.get("type",
+                                                                 "click")])
+        self.aw = tk.StringVar(value=fmt(s.get("aw", 300)))
+        self.ah = tk.StringVar(value=fmt(s.get("ah", 60)))
+        self.method = tk.StringVar(value={"uia": "Windows text",
+                                          "ocr": "OCR (picture)"}.get(
+            s.get("method"), "Auto"))
+        self.mmode = tk.StringVar(value={"equals": "Equals", "regex": "Regex",
+                                         "number": "Number"}.get(
+            s.get("mmode"), "Contains"))
+        self.pattern = tk.StringVar(value=s.get("pattern", ""))
+        self.op = tk.StringVar(value=s.get("op", "≥"))
+        self.num = tk.StringVar(value=fmt(s.get("num", 0)))
+        self.timeout = tk.StringVar(value=fmt(s.get("timeout", 0)))
+        self.on_yes = tk.StringVar(value=s.get("on_yes", "Continue"))
+        self.yes_step = tk.StringVar(value=str(s.get("yes_step", 1)))
+        self.on_no = tk.StringVar(value=s.get("on_no", "Stop"))
+        self.no_step = tk.StringVar(value=str(s.get("no_step", 1)))
+        self.read_result = tk.StringVar(value="")
         self.x = tk.StringVar(value=str(s.get("x", 0)))
         self.y = tk.StringVar(value=str(s.get("y", 0)))
         self.btn = tk.StringVar(value=s.get("button", "Left"))
@@ -535,8 +741,9 @@ class StepDialog(Dialog):
         Choice(rr, self.run_mode, ["Every loop", "Only once (first loop)"],
                cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
-        Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait"],
-               cols=4, size=13).pack(fill="x", pady=(4, 10))
+        Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait",
+                              "🔍 Read"],
+               cols=5, size=12).pack(fill="x", pady=(4, 10))
 
         self.area = tk.Frame(b, bg=self.BG)
         self.area.pack(fill="both", expand=True)
@@ -576,6 +783,75 @@ class StepDialog(Dialog):
         lp = self.link_panel = tk.Frame(self.area, bg=self.BG)
         self.url_row(lp, self.url).pack(fill="x")
 
+        # --- read panel
+        rd = self.read_panel = tk.Frame(self.area, bg=self.BG)
+        big_button(rd, "📍  Pick the spot to read",
+                   lambda: self.pick_into(self.x, self.y), size=13,
+                   pady=9).pack(fill="x")
+        xy2 = tk.Frame(rd, bg=self.BG)
+        xy2.pack(anchor="w", pady=6)
+        self.label(xy2, "X ").pack(side="left")
+        NumField(xy2, self.x, step=1, maxv=99999).pack(side="left")
+        self.label(xy2, "   Y ").pack(side="left")
+        NumField(xy2, self.y, step=1, maxv=99999).pack(side="left")
+        ar = tk.Frame(rd, bg=self.BG)
+        ar.pack(anchor="w", pady=(0, 6))
+        self.label(ar, "Area (for OCR)  W ").pack(side="left")
+        NumField(ar, self.aw, step=20, minv=20, maxv=2000).pack(side="left")
+        self.label(ar, "  H ").pack(side="left")
+        NumField(ar, self.ah, step=10, minv=10, maxv=1200).pack(side="left")
+        self.label(rd, "Read with:").pack(anchor="w")
+        Choice(rd, self.method, ["Auto", "Windows text", "OCR (picture)"],
+               cols=3).pack(fill="x", pady=(2, 6))
+        tr = tk.Frame(rd, bg=self.BG)
+        tr.pack(fill="x", pady=(0, 8))
+        soft_button(tr, "🔍 Test read now", self.test_read
+                    ).pack(side="left")
+        tk.Label(tr, textvariable=self.read_result, bg=self.BG, fg="#0d47a1",
+                 font=(FONT, sz(11)), wraplength=sz(330), justify="left",
+                 anchor="w").pack(side="left", padx=8, fill="x", expand=True)
+
+        self.label(rd, "Text must:").pack(anchor="w")
+        Choice(rd, self.mmode, ["Contains", "Equals", "Regex", "Number"],
+               cols=4).pack(fill="x", pady=(2, 4))
+        self.pat_row = tk.Frame(rd, bg=self.BG)
+        pe = tk.Entry(self.pat_row, textvariable=self.pattern,
+                      font=(FONT, sz(14)), relief="solid", bd=1)
+        pe.pack(side="left", fill="x", expand=True, ipady=sz(6))
+        soft_button(self.pat_row, "⌨",
+                    lambda: (pe.focus_set(), open_touch_keyboard()),
+                    size=13, padx=12, pady=4).pack(side="left", padx=(6, 0))
+        self.num_row = tk.Frame(rd, bg=self.BG)
+        Choice(self.num_row, self.op, ["=", ">", "<", "≥", "≤"], cols=5
+               ).pack(side="left")
+        NumField(self.num_row, self.num, step=1, minv=-1e12, maxv=1e12,
+                 width=8).pack(side="left", padx=(8, 0))
+        self.hint = self.label(rd, "", size=10, bold=False, fg="#666")
+        self.after_match = tk.Frame(rd, bg=self.BG)
+        tm = tk.Frame(self.after_match, bg=self.BG)
+        tm.pack(anchor="w", pady=(6, 0))
+        self.label(tm, "Keep checking for up to ").pack(side="left")
+        NumField(tm, self.timeout, step=1, maxv=3600, width=4
+                 ).pack(side="left")
+        self.label(tm, " sec").pack(side="left")
+        for title, var, stepv in (("✔ If it matches:", self.on_yes,
+                                   self.yes_step),
+                                  ("✖ If not:", self.on_no, self.no_step)):
+            self.label(self.after_match, title).pack(anchor="w", pady=(8, 0))
+            row = tk.Frame(self.after_match, bg=self.BG)
+            row.pack(fill="x")
+            Choice(row, var, ACTIONS, cols=4).pack(fill="x")
+            sr = tk.Frame(self.after_match, bg=self.BG)
+            self.label(sr, "   step number: ", bold=False).pack(side="left")
+            NumField(sr, stepv, step=1, minv=1, maxv=999, width=4
+                     ).pack(side="left")
+            var.trace_add("write", lambda *a, v=var, f=sr, r=row:
+                          self._show_goto(v, f, r))
+            self._show_goto(var, sr, row)
+        self.after_match.pack(fill="x")
+        self.mmode.trace_add("write", lambda *a: self._show_match())
+        self._show_match()
+
         # --- then wait (all)
         self.after_panel = self.wait_row(b, self.amin, self.amax,
                                          "Then wait before next step (sec):")
@@ -587,11 +863,64 @@ class StepDialog(Dialog):
 
     def kind(self):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
-                "⏱ Wait": "wait"}[self.type.get()]
+                "⏱ Wait": "wait", "🔍 Read": "read"}[self.type.get()]
+
+    def _show_goto(self, var, frame, after):
+        if var.get() == "Go to step":
+            frame.pack(after=after, anchor="w", pady=(4, 0))
+        else:
+            frame.pack_forget()
+
+    def _show_match(self):
+        self.pat_row.pack_forget()
+        self.num_row.pack_forget()
+        m = self.mmode.get()
+        hints = {"Contains": "Matches if the text has this word/phrase "
+                             "(empty = any text).",
+                 "Equals": "Matches only if the text is exactly this.",
+                 "Regex": "Pattern, e.g.  ^Score\\s*\\d+   or   "
+                          "done|finished",
+                 "Number": "Uses the first number found in the text."}
+        self.hint.config(text=hints.get(m, ""))
+        self.hint.pack(anchor="w", before=self.after_match)
+        if m == "Number":
+            self.num_row.pack(anchor="w", pady=(2, 0), before=self.hint)
+        else:
+            self.pat_row.pack(fill="x", pady=(2, 0), before=self.hint)
+
+    def _read_rule(self):
+        return {"mmode": self.mmode.get().lower(),
+                "pattern": self.pattern.get(), "op": self.op.get(),
+                "num": fnum(self.num.get())}
+
+    def test_read(self):
+        method = {"Windows text": "uia", "OCR (picture)": "ocr"}.get(
+            self.method.get(), "auto")
+        rule = self._read_rule()
+        wins = (self, self.parent)
+        for w in wins:
+            w.withdraw()
+        self.update()
+        time.sleep(0.35)
+        text, src, err = read_screen_text(
+            method, fnum(self.x.get()), fnum(self.y.get()),
+            fnum(self.aw.get(), 300), fnum(self.ah.get(), 60),
+            want=lambda t: text_matches(rule, t))
+        for w in wins:
+            w.deiconify()
+        self.lift()
+        if text:
+            ok = text_matches(rule, text)
+            src = {"uia": "Windows text", "ocr": "OCR"}.get(src, src)
+            self.read_result.set(f"[{src}] \u201c{text[:120]}\u201d  →  "
+                                 + ("✔ matches" if ok else "✖ no match"))
+        else:
+            self.read_result.set("No text found" + (f" ({err})" if err
+                                                     else ""))
 
     def show(self):
         for p in (self.click_panel, self.key_panel, self.repeat_panel,
-                  self.link_panel):
+                  self.link_panel, self.read_panel):
             p.pack_forget()
         k = self.kind()
         if k == "click":
@@ -602,6 +931,8 @@ class StepDialog(Dialog):
             self.repeat_panel.pack(fill="x")
         elif k == "link":
             self.link_panel.pack(fill="x")
+        elif k == "read":
+            self.read_panel.pack(fill="x")
 
     def ok(self):
         k = self.kind()
@@ -621,6 +952,26 @@ class StepDialog(Dialog):
                       button=self.btn.get())
         elif k == "key":
             st["key"] = self.key.get()
+        elif k == "read":
+            st.update(x=int(fnum(self.x.get())), y=int(fnum(self.y.get())),
+                      aw=int(fnum(self.aw.get(), 300)),
+                      ah=int(fnum(self.ah.get(), 60)),
+                      method={"Windows text": "uia",
+                              "OCR (picture)": "ocr"}.get(self.method.get(),
+                                                          "auto"),
+                      timeout=max(0, fnum(self.timeout.get())),
+                      on_yes=self.on_yes.get(),
+                      yes_step=max(1, int(fnum(self.yes_step.get(), 1))),
+                      on_no=self.on_no.get(),
+                      no_step=max(1, int(fnum(self.no_step.get(), 1))),
+                      **self._read_rule())
+            if st["mmode"] == "regex":
+                try:
+                    re.compile(st["pattern"])
+                except re.error as e:
+                    messagebox.showerror("Step", f"Regex problem: {e}",
+                                         parent=self)
+                    return
         elif k == "link":
             url = fix_url(self.url.get())
             if not url:
@@ -902,6 +1253,17 @@ def describe(st):
         d = f"⌨ {st.get('key')}"
     elif t == "link":
         d = f"🔗 {st.get('url')}"
+    elif t == "read":
+        mm = st.get("mmode", "contains")
+        rule = (f"{st.get('op', '=')} {fmt(st.get('num', 0))}"
+                if mm == "number" else f"\u201c{st.get('pattern', '')}\u201d")
+
+        def act(a, n):
+            return f"step {n}" if a == "Go to step" else a.lower()
+
+        return (f"🔍 Read ({st['x']}, {st['y']}) {mm} {rule} → "
+                f"✔ {act(st.get('on_yes', 'Continue'), st.get('yes_step'))}"
+                f" / ✖ {act(st.get('on_no', 'Stop'), st.get('no_step'))}")
     else:
         return "⏱ Wait"
     n = int(st.get("times", 1))
@@ -1834,12 +2196,15 @@ class App:
                 break          # only "once" steps: nothing left to repeat
             loop += 1
             total = "∞" if loops == 0 else loops
-            for i, st in enumerate(steps):
-                if self.stop.is_set():
-                    break
+            i = 0
+            end_all = False
+            while i < len(steps) and not self.stop.is_set():
+                st = steps[i]
+                nxt = i + 1
                 if not test:
                     self.q.put(("highlight", i))
                 if st.get("run") == "once" and loop > 1:
+                    i = nxt
                     continue
                 nm = st.get("name") or ""
                 label = (f"Loop {loop}/{total} · step {i + 1}/{len(steps)}"
@@ -1872,14 +2237,64 @@ class App:
                     n["link"] += 1
                     self.log(f"seq {loop} {i + 1} link {st['url']}")
                     self.q.put(("count", n))
+                elif t == "read":
+                    ok, text = self.do_read(st, label)
+                    self.log(f"seq {loop} {i + 1} read "
+                             f"{'match' if ok else 'nomatch'} {text!r}")
+                    act = st.get("on_yes" if ok else "on_no", "Continue")
+                    short = (text[:40] + "…") if len(text) > 40 else text
+                    self.q.put(("status", f"{label} · read \u201c{short}\u201d"
+                                f" → {'✔' if ok else '✖'} {act}"))
+                    if act == "Stop":
+                        self.stop.set()
+                        break
+                    if act == "Next loop":
+                        break
+                    if act == "Go to step":
+                        tgt = int(st.get("yes_step" if ok else "no_step", 1))
+                        nxt = min(max(1, tgt), len(steps)) - 1
                 gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
                 if gap > 0 and not self.stop.is_set():
                     self.q.put(("status", f"{label} · waiting {gap:.1f}s"))
                     self.wait(gap)
+                i = nxt
+            if end_all:
+                break
         done = (f"{n['click']} clicks, {n['key']} key presses, "
                 f"{n['link']} links")
         self.q.put(("finished", ("Stopped · " if self.stop.is_set()
                                  else "Done · ") + done))
+
+    def do_read(self, st, label):
+        """Read text for a Read step; keep checking until it matches or
+        the time limit passes. Returns (matched, text)."""
+        limit = fnum(st.get("timeout", 0))
+        end = self.vnow() + limit
+        text = ""
+        while not self.stop.is_set():
+            self.gate()
+            x, y = st["x"], st["y"]
+            aw, ah = fnum(st.get("aw", 300)), fnum(st.get("ah", 60))
+            r = self.mini_rect
+            covered = r and not (x + aw / 2 < r[0] or x - aw / 2 > r[2] or
+                                 y + ah / 2 < r[1] or y - ah / 2 > r[3])
+            if covered:
+                self.q.put(("mini_hide", None))
+                time.sleep(0.3)
+            text, src, err = read_screen_text(
+                st.get("method", "auto"), x, y, aw, ah,
+                want=lambda tx: text_matches(st, tx))
+            if covered:
+                self.q.put(("mini_show", None))
+            if err and not text:
+                self.q.put(("status", f"{label} · read error: {err[:80]}"))
+            if text_matches(st, text):
+                return True, text
+            if self.vnow() >= end:
+                return False, text
+            self.q.put(("status", f"{label} · waiting for text..."))
+            self.wait(min(0.7, max(0.0, end - self.vnow())))
+        return False, text
 
     # timers worker -------------------------------------------------------
     def work_timers(self, cfg):
