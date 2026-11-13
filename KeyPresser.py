@@ -920,6 +920,19 @@ class App:
         r = self.root
         r.update_idletasks()
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        # small screen / high scaling: show fewer list rows so every button
+        # stays visible
+        over = r.winfo_reqheight() - (sh - 90)
+        if over > 0:
+            rowh = 46
+            try:
+                rowh = int(ttk.Style().lookup("Treeview", "rowheight")) or 46
+            except Exception:
+                pass
+            for tv in (self.stree, self.tree, self.ltree):
+                cur = int(tv.cget("height"))
+                tv.configure(height=max(2, cur - (over + rowh - 1) // rowh))
+            r.update_idletasks()
         w = min(max(r.winfo_reqwidth(), 560), sw - 20)
         h = min(r.winfo_reqheight(), sh - 90)
         r.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+10")
