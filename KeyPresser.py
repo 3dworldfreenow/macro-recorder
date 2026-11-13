@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 KeyPresser - presses a keyboard key again and again with a random gap,
-and also clicks the mouse on screen points you choose, each point on its
-own random timer (e.g. every 10-20 seconds).
+clicks the mouse on screen points you choose, each point on its own random
+timer (e.g. every 10-20 seconds), and opens links once or on a repeat timer.
 
 F7 = add a click point at the current mouse position
 F8 = start / stop      ESC = stop
@@ -19,6 +19,7 @@ import random
 import sys
 import threading
 import time
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -106,6 +107,82 @@ class PointDialog(tk.Toplevel):
         self.destroy()
 
 
+class LinkDialog(tk.Toplevel):
+    """Add / edit one link."""
+
+    def __init__(self, parent, link):
+        super().__init__(parent)
+        self.title("Link")
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+        self.result = None
+        f = ttk.Frame(self, padding=12)
+        f.pack()
+        ttk.Label(f, text="Link (URL):").grid(row=0, column=0, sticky="w")
+        self.url = tk.StringVar(value=link["url"])
+        e = ttk.Entry(f, textvariable=self.url, width=46)
+        e.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 8))
+        e.focus_set()
+        self.mode = tk.StringVar(value=link["mode"])
+        ttk.Radiobutton(f, text="Open once (when you press Start)",
+                        variable=self.mode, value="once"
+                        ).grid(row=2, column=0, columnspan=4, sticky="w")
+        ttk.Radiobutton(f, text="Repeat: open again every",
+                        variable=self.mode, value="loop"
+                        ).grid(row=3, column=0, sticky="w")
+        self.min = tk.StringVar(value=str(link["min"]))
+        self.max = tk.StringVar(value=str(link["max"]))
+        ttk.Entry(f, textvariable=self.min, width=6).grid(row=3, column=1)
+        ttk.Label(f, text="to").grid(row=3, column=2, padx=3)
+        ttk.Entry(f, textvariable=self.max, width=6).grid(row=3, column=3)
+        ttk.Label(f, text="seconds (random)").grid(row=4, column=1,
+                                                  columnspan=3, sticky="w")
+        b = ttk.Frame(f)
+        b.grid(row=5, column=0, columnspan=4, pady=(10, 0))
+        ttk.Button(b, text="OK", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(b, text="Cancel", command=self.destroy).pack(side="left")
+        self.bind("<Return>", lambda e: self.ok())
+        self.grab_set()
+        self.wait_window()
+
+    def ok(self):
+        url = fix_url(self.url.get())
+        if not url:
+            messagebox.showerror("Link", "Please type a link", parent=self)
+            return
+        try:
+            a = max(0.0, float(self.min.get()))
+            b = max(0.0, float(self.max.get()))
+        except ValueError:
+            messagebox.showerror("Link", "Please enter numbers", parent=self)
+            return
+        a, b = min(a, b), max(a, b)
+        if self.mode.get() == "loop" and b <= 0:
+            messagebox.showerror("Link", "Repeat time must be more than 0",
+                                 parent=self)
+            return
+        self.result = {"url": url, "mode": self.mode.get(), "min": a, "max": b}
+        self.destroy()
+
+
+def fix_url(url):
+    url = (url or "").strip()
+    if url and "://" not in url and not url.lower().startswith(
+            ("mailto:", "file:")):
+        url = "https://" + url
+    return url
+
+
+def open_link(url):
+    try:
+        if sys.platform == "win32":
+            os.startfile(url)
+        else:
+            webbrowser.open(url, new=2)
+    except Exception:
+        webbrowser.open(url, new=2)
+
+
 class App:
     def __init__(self, root, args):
         self.root, self.args = root, args
@@ -116,6 +193,7 @@ class App:
         self.msc = mouse.Controller()
         self.sending = False
         self.points = []
+        self.links = []
         self.logfile = open(args.log, "a", encoding="utf-8") if args.log else None
 
         s = self._load_settings()
@@ -127,7 +205,19 @@ class App:
                 x, y, a, b = (float(v) for v in spec.split(","))
                 self.points.append({"x": int(x), "y": int(y), "min": a,
                                     "max": b, "click": "Left"})
+        if args.link:                        # links given on command line
+            self.links = []
+            for spec in args.link:
+                parts = spec.split("|")
+                if len(parts) >= 3:
+                    self.links.append({"url": fix_url(parts[0]), "mode": "loop",
+                                       "min": float(parts[1]),
+                                       "max": float(parts[2])})
+                else:
+                    self.links.append({"url": fix_url(parts[0]),
+                                       "mode": "once", "min": 30, "max": 60})
         self._refresh_points()
+        self._refresh_links()
 
         self.listener = keyboard.Listener(on_press=self._on_key)
         self.listener.daemon = True
@@ -148,6 +238,7 @@ class App:
             except Exception:
                 s = {}
         self.points = s.get("points", [])
+        self.links = s.get("links", [])
         return s
 
     def _save_settings(self):
@@ -157,7 +248,9 @@ class App:
                 "kmin": self.kmin.get(), "kmax": self.kmax.get(),
                 "limit": self.limit.get(), "delay": self.delay.get(),
                 "pmin": self.pmin.get(), "pmax": self.pmax.get(),
-                "restore": self.restore.get(), "points": self.points}
+                "restore": self.restore.get(), "points": self.points,
+                "points_on": self.points_on.get(),
+                "links_on": self.links_on.get(), "links": self.links}
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1)
@@ -170,14 +263,17 @@ class App:
         r = self.root
         r.title("KeyPresser")
         r.attributes("-topmost", True)
-        r.minsize(470, 520)
+        r.minsize(480, 470)
         main = ttk.Frame(r, padding=10)
         main.pack(fill="both", expand=True)
+        nb = ttk.Notebook(main)
+        nb.pack(fill="both", expand=True)
 
-        # --- keyboard
-        kf = ttk.LabelFrame(main, text="Keyboard", padding=8)
-        kf.pack(fill="x")
-        self.key_on = tk.BooleanVar(value=s.get("key_on", not a.no_key))
+        # --- keyboard tab
+        kf = ttk.Frame(nb, padding=10)
+        nb.add(kf, text=" Keyboard ")
+        self.key_on = tk.BooleanVar(value=False if a.no_key
+                                    else s.get("key_on", True))
         ttk.Checkbutton(kf, text="Press key:", variable=self.key_on
                         ).grid(row=0, column=0, sticky="w")
         key = a.key if a.key else s.get("key", "Right Arrow (next)")
@@ -208,10 +304,18 @@ class App:
                                                   columnspan=2, sticky="w",
                                                   pady=2)
 
-        # --- mouse points
-        mf = ttk.LabelFrame(main, text="Mouse click points (each on its own "
-                                       "timer)", padding=8)
-        mf.pack(fill="both", expand=True, pady=8)
+        # --- mouse points tab
+        mf = ttk.Frame(nb, padding=10)
+        nb.add(mf, text=" Mouse clicks ")
+        self.points_on = tk.BooleanVar(value=s.get("points_on", True))
+        ttk.Checkbutton(mf, text="Click these points (each on its own timer)",
+                        variable=self.points_on
+                        ).grid(row=0, column=0, columnspan=2, sticky="w",
+                               pady=(0, 4))
+        mf = ttk.Frame(mf)
+        mf.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        mf.master.columnconfigure(0, weight=1)
+        mf.master.rowconfigure(1, weight=1)
         cols = ("n", "x", "y", "click", "every")
         self.tree = ttk.Treeview(mf, columns=cols, show="headings", height=5)
         for c, t, w in (("n", "#", 30), ("x", "X", 60), ("y", "Y", 60),
@@ -250,9 +354,45 @@ class App:
                   ).grid(row=7, column=0, columnspan=2, sticky="w",
                          pady=(4, 0))
 
+        # --- links tab
+        lf = ttk.Frame(nb, padding=10)
+        nb.add(lf, text=" Open links ")
+        self.links_on = tk.BooleanVar(value=s.get("links_on", True))
+        ttk.Checkbutton(lf, text="Open these links in the browser",
+                        variable=self.links_on
+                        ).grid(row=0, column=0, columnspan=2, sticky="w",
+                               pady=(0, 4))
+        self.ltree = ttk.Treeview(lf, columns=("n", "url", "when"),
+                                  show="headings", height=7)
+        for c, t, w in (("n", "#", 30), ("url", "Link", 230),
+                        ("when", "When", 110)):
+            self.ltree.heading(c, text=t)
+            self.ltree.column(c, width=w, anchor="w" if c == "url"
+                              else "center")
+        self.ltree.grid(row=1, column=0, rowspan=5, sticky="nsew")
+        lf.columnconfigure(0, weight=1)
+        lf.rowconfigure(5, weight=1)
+        self.ltree.bind("<Double-1>", lambda e: self.edit_link())
+        for i, (t, cmd) in enumerate((("Add", self.add_link),
+                                      ("Edit", self.edit_link),
+                                      ("Delete", self.delete_link),
+                                      ("Test open", self.test_link))):
+            ttk.Button(lf, text=t, width=11, command=cmd
+                       ).grid(row=i + 1, column=1, padx=(8, 0), pady=1,
+                              sticky="n")
+        ttk.Label(lf, text="Once = opens one time when you press Start.\n"
+                  "Repeat = opens at Start, then again on its random timer.\n"
+                  "Each open makes a new browser tab.",
+                  foreground="#777", justify="left"
+                  ).grid(row=6, column=0, columnspan=2, sticky="w",
+                         pady=(6, 0))
+
+        if a.tab:
+            nb.select({"keyboard": 0, "mouse": 1, "links": 2}.get(a.tab, 0))
+
         # --- start
         sf = ttk.Frame(main)
-        sf.pack(fill="x")
+        sf.pack(fill="x", pady=(8, 0))
         ttk.Label(sf, text="Start delay (sec):").pack(side="left")
         self.delay = tk.StringVar(value=str(a.delay if a.delay is not None
                                             else s.get("delay", "3")))
@@ -263,7 +403,8 @@ class App:
         self.btn.pack(fill="x", pady=(8, 4), ipady=4)
         self.status = tk.StringVar(value="Ready")
         ttk.Label(main, textvariable=self.status, foreground="#0a5").pack()
-        self.count_var = tk.StringVar(value="Key presses: 0 · Clicks: 0")
+        self.count_var = tk.StringVar(
+            value="Key presses: 0 · Clicks: 0 · Links opened: 0")
         ttk.Label(main, textvariable=self.count_var,
                   font=("Segoe UI", 11, "bold")).pack(pady=2)
         ttk.Label(main, text="F7 add point at mouse · F8 start/stop · ESC stop",
@@ -275,6 +416,51 @@ class App:
             self.tree.insert("", "end", iid=str(i), values=(
                 i + 1, p["x"], p["y"], p["click"],
                 f"{p['min']:g} - {p['max']:g}"))
+
+    def _refresh_links(self):
+        self.ltree.delete(*self.ltree.get_children())
+        for i, l in enumerate(self.links):
+            when = ("Once" if l["mode"] == "once"
+                    else f"Every {l['min']:g}-{l['max']:g}s")
+            self.ltree.insert("", "end", iid=str(i),
+                              values=(i + 1, l["url"], when))
+
+    def _lsel(self):
+        s = self.ltree.selection()
+        return int(s[0]) if s else None
+
+    def add_link(self):
+        if self.running():
+            return
+        d = LinkDialog(self.root, {"url": "", "mode": "once", "min": 30,
+                                   "max": 60})
+        if d.result:
+            self.links.append(d.result)
+            self._refresh_links()
+            self._save_settings()
+
+    def edit_link(self):
+        i = self._lsel()
+        if i is None or self.running():
+            return
+        d = LinkDialog(self.root, self.links[i])
+        if d.result:
+            self.links[i] = d.result
+            self._refresh_links()
+            self._save_settings()
+
+    def delete_link(self):
+        i = self._lsel()
+        if i is None or self.running():
+            return
+        del self.links[i]
+        self._refresh_links()
+        self._save_settings()
+
+    def test_link(self):
+        i = self._lsel()
+        if i is not None:
+            open_link(self.links[i]["url"])
 
     def _track_mouse(self):
         try:
@@ -376,11 +562,14 @@ class App:
         cfg = {"key_on": self.key_on.get(),
                "key": KEYS.get(self.key.get(), Key.right),
                "kmin": kmin, "kmax": kmax, "limit": limit, "delay": delay,
-               "points": [dict(p) for p in self.points],
+               "points": ([dict(p) for p in self.points]
+                          if self.points_on.get() else []),
+               "links": ([dict(l) for l in self.links]
+                         if self.links_on.get() else []),
                "restore": self.restore.get(),
                "run_for": self.args.run_for}
-        if not cfg["key_on"] and not cfg["points"]:
-            self.status.set("Turn on the key or add a click point first")
+        if not cfg["key_on"] and not cfg["points"] and not cfg["links"]:
+            self.status.set("Turn on the key, or add a click point or link")
             return
         self._save_settings()
         self.stop.clear()
@@ -412,7 +601,9 @@ class App:
         for i, p in enumerate(cfg["points"]):
             tasks.append({"kind": "point", "i": i, "p": p,
                           "next": start + random.uniform(p["min"], p["max"])})
-        nkeys = nclicks = 0
+        for i, l in enumerate(cfg["links"]):
+            tasks.append({"kind": "link", "i": i, "l": l, "next": start})
+        nkeys = nclicks = nlinks = 0
         self.q.put(("status", "Running... (F8 / ESC to stop)"))
 
         while tasks and not self.stop.is_set():
@@ -438,6 +629,19 @@ class App:
                 else:
                     t["next"] = time.perf_counter() + random.uniform(
                         cfg["kmin"], cfg["kmax"])
+            elif t["kind"] == "link":
+                l = t["l"]
+                try:
+                    open_link(l["url"])
+                except Exception as e:
+                    self.q.put(("status", f"Link error: {e}"))
+                nlinks += 1
+                self.q.put(("log", f"link {t['i'] + 1} {l['url']}"))
+                if l["mode"] == "once":
+                    tasks.remove(t)
+                else:
+                    t["next"] = time.perf_counter() + random.uniform(
+                        l["min"], l["max"])
             else:
                 p = t["p"]
                 try:
@@ -448,11 +652,10 @@ class App:
                 self.q.put(("log", f"click {t['i'] + 1} {p['x']} {p['y']}"))
                 t["next"] = time.perf_counter() + random.uniform(p["min"],
                                                                  p["max"])
-            self.q.put(("count", (nkeys, nclicks)))
+            self.q.put(("count", (nkeys, nclicks, nlinks)))
 
-        msg = (f"Stopped · {nkeys} key presses, {nclicks} clicks"
-               if self.stop.is_set() else
-               f"Done · {nkeys} key presses, {nclicks} clicks")
+        done = f"{nkeys} key presses, {nclicks} clicks, {nlinks} links"
+        msg = ("Stopped · " if self.stop.is_set() else "Done · ") + done
         self.q.put(("finished", msg))
 
     def poll(self):
@@ -469,7 +672,8 @@ class App:
                     self.status.set(val)
                 elif msg == "count":
                     self.count_var.set(f"Key presses: {val[0]} · "
-                                       f"Clicks: {val[1]}")
+                                       f"Clicks: {val[1]} · "
+                                       f"Links opened: {val[2]}")
                 elif msg == "log":
                     if self.logfile:
                         self.logfile.write(f"{time.time():.3f} {val}\n")
@@ -507,6 +711,9 @@ def main():
     p.add_argument("--delay", type=int, default=None)
     p.add_argument("--point", action="append",
                    help="X,Y,MIN,MAX  (can repeat)")
+    p.add_argument("--link", action="append",
+                   help="URL (once) or URL|MIN|MAX (repeat); can repeat")
+    p.add_argument("--tab", default="", help="keyboard / mouse / links")
     p.add_argument("--run-for", type=float, default=0,
                    help="stop after this many seconds")
     p.add_argument("--start", action="store_true")

@@ -65,16 +65,48 @@ jobs:
           foreach ($g in $g2) { if ($g -lt 1.95 -or $g -gt 3.4) { throw "point 2 gap out of range: $g" } }
           "TEST PASSED"
 
+      - name: Test links (1 once + 1 repeating every 3-4 s, for 13 s)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $a = "--start --no-settings --no-key --tab links --delay 1 --link example.com --link https://example.org|3|4 --run-for 13 --quit-when-done --log $pwd\links_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          Start-Sleep 9
+          $ws = New-Object -ComObject WScript.Shell
+          $ws.AppActivate("KeyPresser") | Out-Null
+          Start-Sleep 1
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\keypresser_links_screen.png")
+          $p | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          Get-Process KeyPresser -ErrorAction SilentlyContinue | Stop-Process
+          "--- links log"; Get-Content links_log.txt
+          $log = Get-Content links_log.txt
+          $once = @($log | Where-Object { $_ -match " link 1 https://example.com$" }).Count
+          $t2 = @($log | Where-Object { $_ -match " link 2 https://example.org$" } | ForEach-Object { [double]($_.Split(' ')[0]) })
+          $g2 = for ($i = 1; $i -lt $t2.Count; $i++) { [math]::Round($t2[$i] - $t2[$i-1], 2) }
+          $browsers = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
+          "Once link opened: $once time(s)"
+          "Repeat link opened: $($t2.Count) times, gaps: $($g2 -join ', ')"
+          "Browser processes running: $browsers"
+          if ($once -ne 1) { throw "once-link should open exactly 1 time" }
+          if ($t2.Count -lt 3) { throw "repeat link opened too few times" }
+          foreach ($g in $g2) { if ($g -lt 2.95 -or $g -gt 4.4) { throw "repeat gap out of range: $g" } }
+          if ($browsers -lt 1) { throw "no browser opened" }
+          "LINK TEST PASSED"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: keypresser
           name: KeyPresser (latest build)
           body: |
-            Presses a key (default Right Arrow) with a random 0-2 s gap, and clicks screen points you choose, each on its own random timer (default 10-20 s). F7 adds a point at the mouse.
+            Presses a key (default Right Arrow) with a random 0-2 s gap, and clicks screen points you choose, each on its own random timer (default 10-20 s). F7 adds a point at the mouse. Opens links once or on a repeat timer.
             **KeyPresser.zip** (recommended): unzip, open the KeyPresser folder, run KeyPresser.exe.
           files: |
             KeyPresser.zip
             dist1/KeyPresser.exe
             keypresser_screen.png
+            keypresser_links_screen.png
           make_latest: false
