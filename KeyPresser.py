@@ -310,7 +310,9 @@ class Dialog(tk.Toplevel):
         self.configure(bg=self.BG)
         self.attributes("-topmost", True)
         self.result = None
-        self.body = tk.Frame(self, bg=self.BG, padx=16, pady=12)
+        self.foot = tk.Frame(self, bg=self.BG, padx=16, pady=12)
+        self.foot.pack(side="bottom", fill="x")    # OK/Cancel always visible
+        self.body = tk.Frame(self, bg=self.BG, padx=16, pady=10)
         self.body.pack(fill="both", expand=True)
 
     def label(self, master, text, size=12, bold=True, fg="#1a1a1a"):
@@ -319,8 +321,7 @@ class Dialog(tk.Toplevel):
                         font=(FONT, size, "bold" if bold else "normal"))
 
     def footer(self):
-        f = tk.Frame(self, bg=self.BG, padx=16, pady=12)
-        f.pack(fill="x")
+        f = self.foot
         big_button(f, "✔  OK", self.ok, bg=GREEN, abg=GREEN_A, size=14,
                    pady=12).pack(side="left", fill="x", expand=True,
                                  padx=(0, 6))
@@ -332,7 +333,9 @@ class Dialog(tk.Toplevel):
         self.update_idletasks()
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+        h = min(h, sh - 70)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}"
+                      f"+{max(0, min((sh - h) // 3, sh - h - 60))}")
         self.grab_set()
         self.wait_window()
         return self.result
@@ -429,7 +432,7 @@ class StepDialog(Dialog):
         # --- key panel
         kp = self.key_panel = tk.Frame(self.area, bg=self.BG)
         self.label(kp, "Key:").pack(anchor="w")
-        Choice(kp, self.key, list(KEYS), cols=3, size=11).pack(fill="x",
+        Choice(kp, self.key, list(KEYS), cols=4, size=11).pack(fill="x",
                                                                 pady=(2, 8))
 
         # --- repeat (click + key)
@@ -759,9 +762,10 @@ class App:
         r.title("KeyPresser")
         r.configure(bg=self.BG)
         r.attributes("-topmost", True)
-        r.minsize(600, 700)
-        r.geometry("640x780")
+        r.minsize(520, 480)
 
+        bot = tk.Frame(r, bg=self.BG, padx=10, pady=8)
+        bot.pack(side="bottom", fill="x")      # always visible
         self.nb = ttk.Notebook(r)
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         self.nb.bind("<<NotebookTabChanged>>",
@@ -775,7 +779,7 @@ class App:
         fr, self.stree = self._tree(sq, [("n", "#", 40, "center"),
                                          ("step", "Step", 340, "w"),
                                          ("wait", "Then wait", 110,
-                                          "center")], height=7)
+                                          "center")], height=6)
         fr.pack(fill="both", expand=True, pady=6)
         self.stree.bind("<Double-1>", lambda e: self.edit_step())
         big_button(sq, "➕  Add step", self.add_step, bg=GREEN, abg=GREEN_A,
@@ -890,8 +894,6 @@ class App:
                   size=10, fg="#666").pack(anchor="w", pady=(6, 0))
 
         # ---------------- bottom bar (shared)
-        bot = tk.Frame(r, bg=self.BG, padx=10, pady=8)
-        bot.pack(fill="x")
         row = tk.Frame(bot, bg=self.BG)
         row.pack(fill="x")
         self._lbl(row, "Start delay (sec) ", bold=True).pack(side="left")
@@ -912,6 +914,15 @@ class App:
         tk.Label(bot, textvariable=self.count_var, bg=self.BG,
                  font=(FONT, 12, "bold")).pack()
         self._update_start_text()
+        self._fit_window()
+
+    def _fit_window(self):
+        r = self.root
+        r.update_idletasks()
+        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        w = min(max(r.winfo_reqwidth(), 560), sw - 20)
+        h = min(r.winfo_reqheight(), sh - 90)
+        r.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+10")
 
     def mode(self):
         if self.args.mode:
