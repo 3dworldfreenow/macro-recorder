@@ -31,6 +31,7 @@ import threading
 import time
 import webbrowser
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox
 
 from pynput import keyboard, mouse
@@ -74,6 +75,13 @@ KEYS = {
 CLICK_TYPES = ["Left", "Right", "Double"]
 
 FONT = "Segoe UI"
+SIZES = {"Small": 0.72, "Medium": 0.84, "Large": 1.0}
+SCALE = SIZES["Medium"]
+
+
+def sz(n):
+    """Scale a size for the chosen UI size (Small / Medium / Large)."""
+    return max(1, int(round(n * SCALE)))
 GREEN, GREEN_A = "#2e7d32", "#388e3c"
 RED, RED_A = "#c62828", "#e53935"
 GREY = "#9e9e9e"
@@ -184,7 +192,7 @@ def keyboard_button(master, bg="#5e35b1", abg="#7e57c2", size=13):
     return tk.Button(master, text="⌨  Keyboard", command=open_touch_keyboard,
                      bg=bg, fg="white", activebackground=abg,
                      activeforeground="white", bd=0, relief="flat",
-                     font=("Segoe UI", size, "bold"), padx=16, pady=8,
+                     font=(FONT, sz(size), "bold"), padx=sz(16), pady=sz(8),
                      cursor="hand2", takefocus=0)
 
 
@@ -222,12 +230,12 @@ def pick_on_screen(root, on_done, hide=()):
     ban.attributes("-topmost", True)
     ban.configure(bg="#1e3a5f")
     tk.Label(ban, text="Tap the spot you want clicked", bg="#1e3a5f",
-             fg="white", font=(FONT, 18, "bold")).pack(padx=24, pady=(14, 4))
+             fg="white", font=(FONT, sz(18), "bold")).pack(padx=24, pady=(14, 4))
     tk.Label(ban, text="(anywhere on the dimmed screen)", bg="#1e3a5f",
-             fg="#cfe0f5", font=(FONT, 11)).pack()
+             fg="#cfe0f5", font=(FONT, sz(11))).pack()
     tk.Button(ban, text="CANCEL", bg=RED, fg="white", bd=0,
               activebackground=RED_A, activeforeground="white",
-              font=(FONT, 14, "bold"), padx=30, pady=6,
+              font=(FONT, sz(14), "bold"), padx=30, pady=6,
               command=lambda: finish(None, None)).pack(pady=(10, 14))
     ban.update_idletasks()
     ban.geometry(f"+{(root.winfo_screenwidth() - ban.winfo_reqwidth()) // 2}"
@@ -269,15 +277,15 @@ def big_button(master, text, command, bg=BLUE, abg="#1976d2", size=13,
                padx=14, pady=10):
     return tk.Button(master, text=text, command=command, bg=bg, fg="white",
                      activebackground=abg, activeforeground="white", bd=0,
-                     relief="flat", font=(FONT, size, "bold"), padx=padx,
-                     pady=pady, cursor="hand2")
+                     relief="flat", font=(FONT, sz(size), "bold"),
+                     padx=sz(padx), pady=sz(pady), cursor="hand2")
 
 
 def soft_button(master, text, command, size=12, padx=10, pady=9):
     return tk.Button(master, text=text, command=command, bg="#e3e8ef",
                      fg="#1a1a1a", activebackground="#cfd8e3", bd=0,
-                     relief="flat", font=(FONT, size, "bold"), padx=padx,
-                     pady=pady, cursor="hand2")
+                     relief="flat", font=(FONT, sz(size), "bold"),
+                     padx=sz(padx), pady=sz(pady), cursor="hand2")
 
 
 class NumField(tk.Frame):
@@ -291,8 +299,8 @@ class NumField(tk.Frame):
         soft_button(self, "−", lambda: self.add(-step), size=14, padx=12,
                     pady=2).pack(side="left")
         tk.Entry(self, textvariable=var, width=width, justify="center",
-                 font=(FONT, 14), relief="solid", bd=1
-                 ).pack(side="left", padx=4, ipady=6)
+                 font=(FONT, sz(14)), relief="solid", bd=1
+                 ).pack(side="left", padx=4, ipady=sz(6))
         soft_button(self, "+", lambda: self.add(step), size=14, padx=12,
                     pady=2).pack(side="left")
 
@@ -306,7 +314,7 @@ class Toggle(tk.Button):
 
     def __init__(self, master, text, var):
         super().__init__(master, command=self.flip, bd=0, relief="flat",
-                         font=(FONT, 12, "bold"), padx=14, pady=8,
+                         font=(FONT, sz(12), "bold"), padx=sz(14), pady=sz(8),
                          anchor="w", fg="white", activeforeground="white",
                          cursor="hand2")
         self.label, self.var = text, var
@@ -332,7 +340,8 @@ class Choice(tk.Frame):
         self.var, self.btns = var, {}
         for i, opt in enumerate(options):
             b = tk.Button(self, text=opt, bd=0, relief="flat",
-                          font=(FONT, size, "bold"), padx=10, pady=9,
+                          font=(FONT, sz(size), "bold"), padx=sz(10),
+                          pady=sz(9),
                           cursor="hand2",
                           command=lambda o=opt: self.var.set(o))
             b.grid(row=i // cols, column=i % cols, sticky="ew", padx=2,
@@ -412,7 +421,7 @@ class Dialog(tk.Toplevel):
     def label(self, master, text, size=12, bold=True, fg="#1a1a1a"):
         return tk.Label(master, text=text, bg=self.BG, fg=fg, anchor="w",
                         justify="left",
-                        font=(FONT, size, "bold" if bold else "normal"))
+                        font=(FONT, sz(size), "bold" if bold else "normal"))
 
     def footer(self):
         f = self.foot
@@ -466,9 +475,9 @@ class Dialog(tk.Toplevel):
     def url_row(self, master, var):
         r = tk.Frame(master, bg=self.BG)
         self.label(r, "Link (web address):").pack(anchor="w")
-        e = tk.Entry(r, textvariable=var, font=(FONT, 14), relief="solid",
+        e = tk.Entry(r, textvariable=var, font=(FONT, sz(14)), relief="solid",
                      bd=1, width=34)
-        e.pack(fill="x", ipady=8, pady=(2, 6))
+        e.pack(fill="x", ipady=sz(8), pady=(2, 6))
         b = tk.Frame(r, bg=self.BG)
         b.pack(fill="x")
 
@@ -515,9 +524,9 @@ class StepDialog(Dialog):
         nr = tk.Frame(b, bg=self.BG)
         nr.pack(fill="x", pady=(0, 8))
         self.label(nr, "Name:  ").pack(side="left")
-        ne = tk.Entry(nr, textvariable=self.name, font=(FONT, 14),
+        ne = tk.Entry(nr, textvariable=self.name, font=(FONT, sz(14)),
                       relief="solid", bd=1)
-        ne.pack(side="left", fill="x", expand=True, ipady=6)
+        ne.pack(side="left", fill="x", expand=True, ipady=sz(6))
         soft_button(nr, "⌨", lambda: (ne.focus_set(), open_touch_keyboard()),
                     size=13, padx=12, pady=4).pack(side="left", padx=(6, 0))
         rr = tk.Frame(b, bg=self.BG)
@@ -705,9 +714,9 @@ class NameDialog(Dialog):
         self.label(self.body, "Name:").pack(anchor="w")
         r = tk.Frame(self.body, bg=self.BG)
         r.pack(fill="x", pady=(2, 4))
-        e = tk.Entry(r, textvariable=self.var, font=(FONT, 15),
+        e = tk.Entry(r, textvariable=self.var, font=(FONT, sz(15)),
                      relief="solid", bd=1, width=26)
-        e.pack(side="left", fill="x", expand=True, ipady=8)
+        e.pack(side="left", fill="x", expand=True, ipady=sz(8))
         soft_button(r, "⌨", lambda: (e.focus_set(), open_touch_keyboard()),
                     size=13, padx=12, pady=6).pack(side="left", padx=(6, 0))
         e.focus_set()
@@ -920,6 +929,11 @@ class App:
         self.logfile = open(args.log, "a", encoding="utf-8") if args.log else None
 
         s = self._load_settings()
+        global SCALE
+        self.ui_size = s.get("ui_size", "Medium")
+        if self.args.ui_size:
+            self.ui_size = self.args.ui_size
+        SCALE = SIZES.get(self.ui_size, SIZES["Medium"])
         self._style()
         self._build_ui(s)
         self._apply_cli()
@@ -962,10 +976,8 @@ class App:
         self.steps = self.seqs[self.cur]["steps"]
         return s
 
-    def _save_settings(self):
-        if self.args.no_settings:
-            return
-        data = {"key_on": self.key_on.get(), "key": self.key.get(),
+    def _state(self):
+        return {"key_on": self.key_on.get(), "key": self.key.get(),
                 "kmin": self.kmin.get(), "kmax": self.kmax.get(),
                 "limit": self.limit.get(), "delay": self.delay.get(),
                 "pmin": self.pmin.get(), "pmax": self.pmax.get(),
@@ -973,7 +985,12 @@ class App:
                 "points_on": self.points_on.get(),
                 "links_on": self.links_on.get(), "links": self.links,
                 "seqs": self._sync_loops(), "cur": self.cur,
-                "hide": self.hide.get()}
+                "hide": self.hide.get(), "ui_size": self.ui_size}
+
+    def _save_settings(self):
+        if self.args.no_settings:
+            return
+        data = self._state()
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1)
@@ -1027,23 +1044,23 @@ class App:
             st.theme_use("clam")
         except Exception:
             pass
-        st.configure(".", font=(FONT, 12), background=self.BG)
+        st.configure(".", font=(FONT, sz(12)), background=self.BG)
         st.configure("TFrame", background=self.BG)
         st.configure("TNotebook", background=self.BG, borderwidth=0)
-        st.configure("TNotebook.Tab", font=(FONT, 13, "bold"),
-                     padding=(18, 12))
+        st.configure("TNotebook.Tab", font=(FONT, sz(13), "bold"),
+                     padding=(sz(18), sz(10)))
         st.map("TNotebook.Tab", background=[("selected", "white")])
-        st.configure("Treeview", rowheight=46, font=(FONT, 12),
+        st.configure("Treeview", rowheight=sz(46), font=(FONT, sz(12)),
                      fieldbackground="white")
-        st.configure("Treeview.Heading", font=(FONT, 11, "bold"),
+        st.configure("Treeview.Heading", font=(FONT, sz(11), "bold"),
                      padding=6)
         st.map("Treeview", background=[("selected", "#bbdefb")],
                foreground=[("selected", "#000")])
-        st.configure("Vertical.TScrollbar", arrowsize=30)
+        st.configure("Vertical.TScrollbar", arrowsize=sz(30))
 
     def _lbl(self, master, text, size=12, bold=False, fg="#1a1a1a"):
         return tk.Label(master, text=text, bg=self.BG, fg=fg,
-                        font=(FONT, size, "bold" if bold else "normal"),
+                        font=(FONT, sz(size), "bold" if bold else "normal"),
                         anchor="w", justify="left")
 
     def _tree(self, master, cols, height=6):
@@ -1075,15 +1092,17 @@ class App:
         r.title("KeyPresser")
         r.configure(bg=self.BG)
         r.attributes("-topmost", True)
-        r.minsize(520, 480)
+        r.minsize(sz(480), sz(420))
 
         bot = tk.Frame(r, bg=self.BG, padx=10, pady=8)
         bot.pack(side="bottom", fill="x")      # always visible
         topbar = tk.Frame(r, bg=self.BG, padx=8, pady=6)
         topbar.pack(side="top", fill="x")
         tk.Label(topbar, text="KeyPresser", bg=self.BG, fg="#37474f",
-                 font=(FONT, 14, "bold")).pack(side="left")
+                 font=(FONT, sz(14), "bold")).pack(side="left")
         keyboard_button(topbar).pack(side="right")
+        soft_button(topbar, f"Aa  {self.ui_size}", self.next_ui_size,
+                    size=11, padx=12, pady=7).pack(side="right", padx=(0, 6))
         self.nb = ttk.Notebook(r)
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         self.nb.bind("<<NotebookTabChanged>>",
@@ -1197,7 +1216,7 @@ class App:
                ).pack(fill="x", pady=(8, 0))
         self.mouse_pos = tk.StringVar(value="")
         tk.Label(mf, textvariable=self.mouse_pos, bg=self.BG, fg="#06c",
-                 font=(FONT, 11)).pack(anchor="w", pady=(4, 0))
+                 font=(FONT, sz(11))).pack(anchor="w", pady=(4, 0))
 
         # ---------------- Links timer tab
         lf = tk.Frame(self.nb, bg=self.BG, padx=10, pady=10)
@@ -1237,10 +1256,10 @@ class App:
         self.start_btn.pack(fill="x", pady=(8, 4))
         self.status = tk.StringVar(value="Ready")
         tk.Label(bot, textvariable=self.status, bg=self.BG, fg=GREEN,
-                 font=(FONT, 12)).pack()
+                 font=(FONT, sz(12))).pack()
         self.count_var = tk.StringVar(value="")
         tk.Label(bot, textvariable=self.count_var, bg=self.BG,
-                 font=(FONT, 12, "bold")).pack()
+                 font=(FONT, sz(12), "bold")).pack()
         self._update_start_text()
         self._update_seq_btn()
         self._fit_window()
@@ -1326,6 +1345,28 @@ class App:
         return int(s[0]) if s else None
 
     # ---------------------------------------------------------- steps
+    def next_ui_size(self):
+        """Small -> Medium -> Large: rebuild the window at the new size."""
+        if self.running():
+            return
+        names = list(SIZES)
+        nxt = names[(names.index(self.ui_size) + 1) % len(names)
+                    if self.ui_size in names else 1]
+        s = self._state()
+        tab = self.nb.index("current")
+        global SCALE
+        self.ui_size = nxt
+        s["ui_size"] = nxt
+        SCALE = SIZES[nxt]
+        for w in self.root.winfo_children():
+            w.destroy()
+        self._style()
+        self._build_ui(s)
+        self._refresh_all()
+        self.nb.select(tab)
+        self._save_settings()
+        self.status.set(f"Size: {nxt}")
+
     def _sync_loops(self):
         if hasattr(self, "loops") and 0 <= self.cur < len(self.seqs):
             self.seqs[self.cur]["loops"] = self.loops.get()
@@ -1644,16 +1685,16 @@ class App:
         m.attributes("-topmost", True)
         m.configure(bg="#263238")
         handle = tk.Label(m, text="⠿ drag", bg="#263238", fg="#90a4ae",
-                          font=(FONT, 10))
+                          font=(FONT, sz(10)))
         handle.pack(fill="x")
         self.mini_status = tk.Label(m, text="Starting...", bg="#263238",
-                                    fg="white", font=(FONT, 10),
-                                    wraplength=210, justify="center")
+                                    fg="white", font=(FONT, sz(10)),
+                                    wraplength=sz(210), justify="center")
         self.mini_status.pack(padx=8)
         big_button(m, "■  STOP", self.stop.set, bg=RED, abg=RED_A,
                    size=16, padx=34, pady=12).pack(padx=8, pady=8)
         m.update_idletasks()
-        w = max(230, m.winfo_reqwidth())
+        w = max(sz(230), m.winfo_reqwidth())
         x = self.root.winfo_screenwidth() - w - 20
         m.geometry(f"{w}x{m.winfo_reqheight()}+{x}+20")
 
@@ -1890,6 +1931,7 @@ def main():
     p.add_argument("--seq", default="", help="sequence name to select")
     p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--show-keyboard", action="store_true")
+    p.add_argument("--ui-size", choices=list(SIZES), default=None)
     p.add_argument("--key", default=None)
     p.add_argument("--no-key", action="store_true")
     p.add_argument("--min", type=float, default=None)
@@ -1909,6 +1951,15 @@ def main():
     p.add_argument("--log", default="")
     args, _ = p.parse_known_args()
     root = tk.Tk()
+    global FONT
+    try:
+        fams = set(tkfont.families(root))
+        for f in ("Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI"):
+            if f in fams:
+                FONT = f
+                break
+    except Exception:
+        pass
     App(root, args)
     root.mainloop()
 
