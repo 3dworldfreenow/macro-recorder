@@ -82,40 +82,46 @@ def pick_on_screen(root, on_done, hide=()):
     ov.geometry(f"{w}x{h}+{x0}+{y0}")
     ov.attributes("-topmost", True)
     try:
-        ov.attributes("-alpha", 0.35)
+        ov.attributes("-alpha", 0.3)
     except Exception:
         pass
     c = tk.Canvas(ov, bg="black", highlightthickness=0, cursor="crosshair")
     c.pack(fill="both", expand=True)
-    cx = (root.winfo_screenwidth() // 2) - x0
-    c.create_text(cx, 90, fill="white", font=("Segoe UI", 22, "bold"),
-                  text="Tap (or click) the spot you want clicked")
-    c.create_text(cx, 130, fill="white", font=("Segoe UI", 13),
-                  text="Tap CANCEL below to go back")
-    bx1, by1, bx2, by2 = cx - 90, 165, cx + 90, 215
-    c.create_rectangle(bx1, by1, bx2, by2, fill="#b00", outline="white",
-                       width=2)
-    c.create_text(cx, 190, fill="white", font=("Segoe UI", 16, "bold"),
-                  text="CANCEL")
+
+    # solid, easy-to-read banner on top of the dimmed screen
+    ban = tk.Toplevel(root)
+    ban.overrideredirect(True)
+    ban.attributes("-topmost", True)
+    ban.configure(bg="#1e3a5f")
+    tk.Label(ban, text="Tap the spot you want clicked", bg="#1e3a5f",
+             fg="white", font=("Segoe UI", 18, "bold")
+             ).pack(padx=24, pady=(14, 4))
+    tk.Label(ban, text="(anywhere on the dimmed screen)", bg="#1e3a5f",
+             fg="#cfe0f5", font=("Segoe UI", 11)).pack()
+    tk.Button(ban, text="CANCEL", bg="#c62828", fg="white", bd=0,
+              activebackground="#e53935", font=("Segoe UI", 14, "bold"),
+              padx=30, pady=6, command=lambda: finish(None, None)
+              ).pack(pady=(10, 14))
+    ban.update_idletasks()
+    bw = ban.winfo_reqwidth()
+    ban.geometry(f"+{(root.winfo_screenwidth() - bw) // 2}+40")
 
     def finish(x, y):
-        try:
-            ov.destroy()
-        except Exception:
-            pass
+        for win in (ban, ov):
+            try:
+                win.destroy()
+            except Exception:
+                pass
         for win in hide:
             win.deiconify()
         on_done(x, y)
 
     def tapped(e):
-        if bx1 <= e.x <= bx2 and by1 <= e.y <= by2:
-            finish(None, None)
-        else:
-            finish(e.x_root, e.y_root)
+        finish(e.x_root, e.y_root)
 
     c.bind("<ButtonPress-1>", tapped)
     ov.bind("<Escape>", lambda e: finish(None, None))
-    ov.after(50, lambda: (ov.lift(), ov.focus_force()))
+    ov.after(50, lambda: (ov.lift(), ban.lift(), ov.focus_force()))
     return ov
 
 
