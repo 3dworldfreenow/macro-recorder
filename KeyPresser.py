@@ -459,6 +459,23 @@ def text_matches(st, text):
 ACTIONS = ["Continue", "Go to step", "Next loop", "Stop"]
 
 
+def rule_text(st):
+    mm = st.get("mmode", "contains")
+    if mm == "number":
+        return f"number {st.get('op', '=')} {fmt(st.get('num', 0))}"
+    pat = st.get("pattern", "")
+    if mm == "contains" and not pat:
+        return "any text"
+    return f"{mm} \u201c{pat}\u201d"
+
+
+def action_text(st, ok):
+    a = st.get("on_yes" if ok else "on_no", "Continue")
+    if a == "Go to step":
+        return f"go to step {st.get('yes_step' if ok else 'no_step', 1)}"
+    return a.lower()
+
+
 # ====================================================================
 # touch widgets
 # ====================================================================
@@ -1286,6 +1303,8 @@ class App:
         self.paused_total = 0.0
         self.pause_started = 0.0
         self.pause_btns = []
+        self.live = {}
+        self.mini_compact = False
         self.worker = None
         self.kbc = keyboard.Controller()
         self.msc = mouse.Controller()
@@ -1295,6 +1314,7 @@ class App:
         self.logfile = open(args.log, "a", encoding="utf-8") if args.log else None
 
         s = self._load_settings()
+        self.mini_compact = bool(s.get("mini_compact", False))
         global SCALE
         self.ui_size = s.get("ui_size", "Medium")
         if self.args.ui_size:
@@ -1311,6 +1331,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(50, self.poll)
         root.after(150, self._track_mouse)
+        root.after(200, self._live_tick)
         if args.start:
             root.after(400, self.start)
         if args.open_picker:
@@ -1355,7 +1376,8 @@ class App:
                 "points_on": self.points_on.get(),
                 "links_on": self.links_on.get(), "links": self.links,
                 "seqs": self._sync_loops(), "cur": self.cur,
-                "hide": self.hide.get(), "ui_size": self.ui_size}
+                "hide": self.hide.get(), "ui_size": self.ui_size,
+                "mini_compact": self.mini_compact}
 
     def _save_settings(self):
         if self.args.no_settings:
@@ -2055,6 +2077,9 @@ class App:
         self.stop.clear()
         self.pause.clear()
         self.paused_total = 0.0
+        self.live = {"v0": self.vnow(), "cd": None, "read": None,
+                     "step": "", "desc": "",
+                     "counts": {"click": 0, "key": 0, "link": 0, "read": 0}}
         self.pause_btn.pack(side="left", padx=(6, 0))
         self._draw_pause_btns()
         self.worker = threading.Thread(target=target, daemon=True)
@@ -2066,30 +2091,93 @@ class App:
     # floating mini Stop window --------------------------------------
     def show_mini(self):
         self.root.withdraw()
+        BG, PANEL, SUB = "#1f2a30", "#2b3a42", "#9fb3bf"
         m = self.mini = tk.Toplevel(self.root)
         m.overrideredirect(True)
         m.attributes("-topmost", True)
-        m.configure(bg="#263238")
-        handle = tk.Label(m, text="⠿ drag", bg="#263238", fg="#90a4ae",
-                          font=(FONT, sz(10)))
-        handle.pack(fill="x")
-        self.mini_status = tk.Label(m, text="Starting...", bg="#263238",
-                                    fg="white", font=(FONT, sz(10)),
-                                    wraplength=sz(210), justify="center")
-        self.mini_status.pack(padx=8)
-        br = tk.Frame(m, bg="#263238")
-        br.pack(padx=8, pady=8)
+        m.configure(bg=BG)
+        W = sz(320)
+        wrap = W - sz(24)
+
+        def L(master, text="", size=10, fg="white", bold=False, bg=BG,
+              **kw):
+            return tk.Label(master, text=text, bg=bg, fg=fg, anchor="w",
+                            justify="left", wraplength=wrap,
+                            font=(FONT, sz(size), "bold" if bold else
+                                  "normal"), **kw)
+
+        # header: drag handle, elapsed time, collapse
+        hd = tk.Frame(m, bg=BG)
+        hd.pack(fill="x", padx=8, pady=(6, 0))
+        handle = L(hd, "⠿  KeyPresser", 10, SUB, True)
+        handle.pack(side="left")
+        tk.Button(hd, text="▸" if self.mini_compact else "▾",
+                  command=self._toggle_mini_detail, bg=BG, fg=SUB, bd=0,
+                  activebackground=PANEL, activeforeground="white",
+                  font=(FONT, sz(13), "bold"), padx=sz(8), cursor="hand2"
+                  ).pack(side="right")
+        self.mi_elapsed = L(hd, "⏱ 0:00", 10, SUB)
+        self.mi_elapsed.pack(side="right", padx=(0, 6))
+        self.mi_toggle = hd.winfo_children()[1]
+
+        self.mini_status = L(m, "Starting...", 10, "white")
+        self.mini_status.pack(fill="x", padx=10, pady=(2, 4))
+
+        # details
+        d = self.mi_detail = tk.Frame(m, bg=BG)
+        self.mi_step = L(d, "", 11, "white", True)
+        self.mi_step.pack(fill="x", padx=10)
+        self.mi_desc = L(d, "", 10, SUB)
+        self.mi_desc.pack(fill="x", padx=10)
+
+        cd = tk.Frame(d, bg=PANEL)
+        cd.pack(fill="x", padx=8, pady=(6, 0))
+        top = tk.Frame(cd, bg=PANEL)
+        top.pack(fill="x", padx=8, pady=(6, 0))
+        self.mi_cd_what = L(top, "⏳ —", 10, SUB, bg=PANEL)
+        self.mi_cd_what.config(wraplength=wrap - sz(90))
+        self.mi_cd_what.pack(side="left")
+        self.mi_cd_num = tk.Label(top, text="", bg=PANEL, fg="#ffd54f",
+                                  font=(FONT, sz(20), "bold"))
+        self.mi_cd_num.pack(side="right")
+        self.mi_bar = tk.Canvas(cd, height=sz(7), bg="#37474f",
+                                highlightthickness=0, width=W - sz(32))
+        self.mi_bar.pack(fill="x", padx=8, pady=(2, 8))
+
+        rd = self.mi_read_box = tk.Frame(d, bg=PANEL)
+        rd.pack(fill="x", padx=8, pady=(6, 0))
+        rt = tk.Frame(rd, bg=PANEL)
+        rt.pack(fill="x", padx=8, pady=(6, 0))
+        L(rt, "🔍 Last read", 10, SUB, True, bg=PANEL).pack(side="left")
+        self.mi_read_ago = L(rt, "", 9, SUB, bg=PANEL)
+        self.mi_read_ago.pack(side="right")
+        self.mi_read_text = L(rd, "— nothing read yet —", 11, "#fff59d",
+                              bg=PANEL)
+        self.mi_read_text.pack(fill="x", padx=8)
+        self.mi_read_rule = L(rd, "", 10, SUB, bg=PANEL)
+        self.mi_read_rule.pack(fill="x", padx=8)
+        self.mi_read_res = L(rd, "", 11, "white", True, bg=PANEL)
+        self.mi_read_res.pack(fill="x", padx=8, pady=(0, 6))
+
+        self.mi_counts = L(d, "", 10, SUB)
+        self.mi_counts.pack(fill="x", padx=10, pady=(6, 0))
+        if not self.mini_compact:
+            d.pack(fill="x")
+
+        br = self.mi_buttons = tk.Frame(m, bg=BG)
+        br.pack(fill="x", padx=8, pady=8)
         pb = big_button(br, "⏸  PAUSE", self.toggle_pause, bg="#ef6c00",
-                        abg="#fb8c00", size=14, padx=14, pady=12)
-        pb.pack(side="left", padx=(0, 6))
+                        abg="#fb8c00", size=14, padx=10, pady=11)
+        pb.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.pause_btns.append(pb)
         big_button(br, "■  STOP", self.stop.set, bg=RED, abg=RED_A,
-                   size=14, padx=18, pady=12).pack(side="left")
+                   size=14, padx=10, pady=11).pack(side="left", fill="x",
+                                                   expand=True)
         self._draw_pause_btns()
         m.update_idletasks()
-        w = max(sz(230), m.winfo_reqwidth())
-        x = self.root.winfo_screenwidth() - w - 20
-        m.geometry(f"{w}x{m.winfo_reqheight()}+{x}+20")
+        m.geometry(f"{W}x{m.winfo_reqheight()}"
+                   f"+{self.root.winfo_screenwidth() - W - 16}+16")
+        self._refresh_mini()
 
         def press(e):
             m._dx, m._dy = e.x_root - m.winfo_x(), e.y_root - m.winfo_y()
@@ -2098,10 +2186,116 @@ class App:
             m.geometry(f"+{e.x_root - m._dx}+{e.y_root - m._dy}")
             self._update_mini_rect()
 
-        for wdg in (handle, self.mini_status, m):
+        for wdg in (handle, hd, self.mini_status, self.mi_step,
+                    self.mi_desc, self.mi_elapsed):
             wdg.bind("<ButtonPress-1>", press)
             wdg.bind("<B1-Motion>", drag)
         m.after(100, self._update_mini_rect)
+
+    def _toggle_mini_detail(self):
+        if not self.mini:
+            return
+        self.mini_compact = not self.mini_compact
+        if self.mini_compact:
+            self.mi_detail.pack_forget()
+        else:
+            self.mi_detail.pack(fill="x", after=self.mini_status)
+        self.mi_toggle.config(text="▸" if self.mini_compact else "▾")
+        self._fit_mini()
+
+    def _fit_mini(self):
+        m = self.mini
+        if not m:
+            return
+        m.update_idletasks()
+        m.geometry(f"{m.winfo_width()}x{m.winfo_reqheight()}"
+                   f"+{m.winfo_x()}+{m.winfo_y()}")
+        self._update_mini_rect()
+
+    def _refresh_mini(self):
+        """Fill the floating window from self.live (called on updates)."""
+        if not self.mini:
+            return
+        lv = self.live
+        try:
+            self.mi_step.config(text=lv.get("step", ""))
+            self.mi_desc.config(text=lv.get("desc", ""))
+            c = lv.get("counts", {})
+            self.mi_counts.config(
+                text=f"🖱 {c.get('click', 0)}   ⌨ {c.get('key', 0)}   "
+                     f"🔗 {c.get('link', 0)}   🔍 {c.get('read', 0)}")
+            r = lv.get("read")
+            if r:
+                src = {"uia": "Windows text", "ocr": "OCR"}.get(r["src"],
+                                                                r["src"])
+                txt = r["text"] or "(no text found)"
+                if len(txt) > 90:
+                    txt = txt[:90] + "…"
+                self.mi_read_text.config(
+                    text=f"\u201c{txt}\u201d" + (f"   [{src}]" if src else ""))
+                self.mi_read_rule.config(text=f"Rule: {r['rule']}")
+                if r.get("final"):
+                    self.mi_read_res.config(
+                        text=("✔ match" if r["ok"] else "✖ no match")
+                        + f"  →  {r['action']}",
+                        fg="#81c784" if r["ok"] else "#e57373")
+                else:
+                    self.mi_read_res.config(
+                        text=("✔ match" if r["ok"] else "✖ not yet")
+                        + "  ·  checking…", fg="#ffd54f")
+        except tk.TclError:
+            pass
+        self._fit_mini()
+
+    def _live_tick(self):
+        """10x per second: countdown, elapsed time, 'x s ago'."""
+        try:
+            if self.running() and self.live:
+                lv = self.live
+                now = self.vnow()
+                el = max(0, now - lv.get("v0", now))
+                h, rem = divmod(int(el), 3600)
+                el_txt = (f"{h}:{rem // 60:02d}:{rem % 60:02d}" if h
+                          else f"{rem // 60}:{rem % 60:02d}")
+                cd = lv.get("cd")
+                paused = self.pause.is_set()
+                if cd:
+                    end, total, what = cd
+                    left = max(0.0, end - now)
+                    num = (f"{int(left // 60)}:{int(left % 60):02d}"
+                           if left >= 60 else f"{left:.1f}")
+                    frac = (left / total) if total > 0 else 0
+                else:
+                    what, num, frac = "working…", "", 0
+                if paused:
+                    what = "⏸ paused · " + what
+                if self.mini:
+                    self.mi_elapsed.config(text=f"⏱ {el_txt}")
+                    self.mi_cd_what.config(text=f"⏳ {what}")
+                    self.mi_cd_num.config(text=num)
+                    bw = self.mi_bar.winfo_width()
+                    self.mi_bar.delete("all")
+                    if frac > 0:
+                        self.mi_bar.create_rectangle(
+                            0, 0, int(bw * frac), sz(8),
+                            fill="#ffb300" if not paused else "#90a4ae",
+                            width=0)
+                    r = lv.get("read")
+                    if r:
+                        ago = max(0, int(now - r["t"]))
+                        self.mi_read_ago.config(
+                            text="just now" if ago < 2 else f"{ago}s ago")
+                else:
+                    extra = f"   ⏳ {what} {num}s" if num else ""
+                    self.count_var.set(self._counts_text() + extra)
+        except tk.TclError:
+            pass
+        self.root.after(100, self._live_tick)
+
+    def _counts_text(self):
+        c = self.live.get("counts", {}) if self.live else {}
+        return (f"Clicks: {c.get('click', 0)} · Keys: {c.get('key', 0)} · "
+                f"Links: {c.get('link', 0)} · Reads: {c.get('read', 0)}")
 
     def _update_mini_rect(self):
         m = self.mini
@@ -2146,8 +2340,14 @@ class App:
             time.sleep(min(left, 0.01))
         return False
 
-    def wait(self, secs):
-        return self.wait_until(self.vnow() + max(0.0, secs))
+    def wait(self, secs, what=None):
+        secs = max(0.0, secs)
+        if what and secs >= 0.15:
+            self.q.put(("cd", (self.vnow() + secs, secs, what)))
+            ok = self.wait_until(self.vnow() + secs)
+            self.q.put(("cd", None))
+            return ok
+        return self.wait_until(self.vnow() + secs)
 
     def toggle_pause(self):
         if not self.running():
@@ -2176,16 +2376,21 @@ class App:
                 self.pause_btns.remove(b)
 
     def countdown(self, n):
+        if n > 0:
+            self.q.put(("cd", (self.vnow() + n, n, "Starting – switch to "
+                                                   "your window")))
         for s in range(n, 0, -1):
             self.q.put(("status", f"Starting in {s}..."))
             if not self.wait(1):
+                self.q.put(("cd", None))
                 return False
+        self.q.put(("cd", None))
         return True
 
     # sequence worker ----------------------------------------------------
     def work_sequence(self, cfg, test=False):
         steps, loops = cfg["steps"], cfg["loops"]
-        n = {"click": 0, "key": 0, "link": 0}
+        n = {"click": 0, "key": 0, "link": 0, "read": 0}
         if not self.countdown(cfg["delay"]):
             self.q.put(("finished", "Stopped"))
             return
@@ -2210,6 +2415,10 @@ class App:
                 label = (f"Loop {loop}/{total} · step {i + 1}/{len(steps)}"
                          + (f" · {nm}" if nm else ""))
                 self.q.put(("status", label))
+                self.q.put(("live", {
+                    "step": f"Loop {loop}/{total}  ·  Step {i + 1}/"
+                            f"{len(steps)}" + (f"  ·  {nm}" if nm else ""),
+                    "desc": describe(st)}))
                 t = st.get("type")
                 times = max(1, int(st.get("times", 1)))
                 if t in ("click", "key"):
@@ -2230,7 +2439,9 @@ class App:
                         self.q.put(("count", n))
                         if k < times - 1:
                             self.wait(random.uniform(st.get("tmin", 0),
-                                                     st.get("tmax", 0)))
+                                                     st.get("tmax", 0)),
+                                      f"gap before {'click' if t == 'click' else 'key'}"
+                                      f" {k + 2} of {times}")
                 elif t == "link":
                     self.gate()
                     open_link(st["url"])
@@ -2238,7 +2449,12 @@ class App:
                     self.log(f"seq {loop} {i + 1} link {st['url']}")
                     self.q.put(("count", n))
                 elif t == "read":
-                    ok, text = self.do_read(st, label)
+                    ok, text, src = self.do_read(st, label)
+                    n["read"] = n.get("read", 0) + 1
+                    self.q.put(("count", n))
+                    self.q.put(("read", {"text": text, "src": src, "ok": ok,
+                                         "rule": rule_text(st), "final": True,
+                                         "action": action_text(st, ok)}))
                     self.log(f"seq {loop} {i + 1} read "
                              f"{'match' if ok else 'nomatch'} {text!r}")
                     act = st.get("on_yes" if ok else "on_no", "Continue")
@@ -2256,7 +2472,7 @@ class App:
                 gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
                 if gap > 0 and not self.stop.is_set():
                     self.q.put(("status", f"{label} · waiting {gap:.1f}s"))
-                    self.wait(gap)
+                    self.wait(gap, "wait before next step")
                 i = nxt
             if end_all:
                 break
@@ -2270,7 +2486,10 @@ class App:
         the time limit passes. Returns (matched, text)."""
         limit = fnum(st.get("timeout", 0))
         end = self.vnow() + limit
-        text = ""
+        text, src = "", ""
+        if limit > 0:
+            self.q.put(("cd", (end, limit, "checking text until it "
+                                           "matches")))
         while not self.stop.is_set():
             self.gate()
             x, y = st["x"], st["y"]
@@ -2288,13 +2507,18 @@ class App:
                 self.q.put(("mini_show", None))
             if err and not text:
                 self.q.put(("status", f"{label} · read error: {err[:80]}"))
-            if text_matches(st, text):
-                return True, text
-            if self.vnow() >= end:
-                return False, text
+            ok = text_matches(st, text)
+            self.q.put(("read", {"text": text, "src": src, "ok": ok,
+                                 "rule": rule_text(st), "final": False,
+                                 "action": ""}))
+            if ok or self.vnow() >= end:
+                if limit > 0:
+                    self.q.put(("cd", None))
+                return ok, text, src
             self.q.put(("status", f"{label} · waiting for text..."))
             self.wait(min(0.7, max(0.0, end - self.vnow())))
-        return False, text
+        self.q.put(("cd", None))
+        return False, text, src
 
     # timers worker -------------------------------------------------------
     def work_timers(self, cfg):
@@ -2318,8 +2542,14 @@ class App:
             if deadline and t["next"] > deadline:
                 self.wait_until(deadline)
                 break
+            what = {"key": "next key press", "link": "next link",
+                    "point": f"next click (point {t.get('i', 0) + 1})"}[t["kind"]]
+            left = t["next"] - self.vnow()
+            if left > 0.15:
+                self.q.put(("cd", (t["next"], left, what)))
             if not self.wait_until(t["next"]):
                 break
+            self.q.put(("cd", None))
             if t["kind"] == "key":
                 self.press_key(cfg["key"])
                 n["key"] += 1
@@ -2374,8 +2604,19 @@ class App:
                         self.stree.selection_set(str(val))
                         self.stree.see(str(val))
                 elif msg == "count":
-                    self.count_var.set(f"Clicks: {val['click']} · Keys: "
-                                       f"{val['key']} · Links: {val['link']}")
+                    if self.live is not None:
+                        self.live["counts"] = dict(val)
+                    self.count_var.set(self._counts_text())
+                    self._refresh_mini()
+                elif msg == "live":
+                    self.live.update(val)
+                    self._refresh_mini()
+                elif msg == "cd":
+                    self.live["cd"] = val
+                elif msg == "read":
+                    val["t"] = self.vnow()
+                    self.live["read"] = val
+                    self._refresh_mini()
                 elif msg == "mini_hide" and self.mini:
                     self.mini.withdraw()
                 elif msg == "mini_show" and self.mini:

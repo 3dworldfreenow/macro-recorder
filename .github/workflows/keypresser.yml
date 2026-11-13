@@ -352,6 +352,32 @@ jobs:
           "READ TEXT TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
 
+      - name: Screenshot detailed floating window (read + countdown)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $steps = @(
+            @{type="read"; name="Check unread"; x=[int]$pos[0]; y=[int]$pos[1]; aw=300; ah=70; method="auto"; mmode="number"; op="="; num=2; on_yes="Stop"; on_no="Continue"; amin=0; amax=0},
+            @{type="wait"; name="Wait a bit"; amin=8; amax=8}
+          )
+          @{loops=2; steps=$steps} | ConvertTo-Json -Depth 5 | Set-Content seq_float.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_float.json --start --no-settings --delay 2 --quit-when-done --log $pwd\float_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          Start-Sleep 8
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$pwd\kp_floating.png")
+          $p | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+          Get-Content float_log.txt
+          $n = @(Get-Content float_log.txt | Where-Object { $_ -match " read nomatch 'Score: 42'" }).Count
+          if ($n -ne 2) { throw "expected 2 reads of Score: 42 (no match, continue)" }
+          "FLOATING TEST PASSED"
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+
       - name: Screenshot Read step editor
         shell: pwsh
         run: |
@@ -387,6 +413,7 @@ jobs:
             kp_paused.png
             kp_read_running.png
             kp_step_read.png
+            kp_floating.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
