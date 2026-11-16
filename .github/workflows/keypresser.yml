@@ -378,6 +378,33 @@ jobs:
           "FLOATING TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
 
+      - name: Test switching sequences (read result + when finished)
+        shell: pwsh
+        run: |
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $x=[int]$pos[0]; $y=[int]$pos[1]
+          $seqs = @(
+            @{name="A"; loops="2"; then="next"; steps=@(@{type="key"; key="Home"; amin=0.2; amax=0.2})},
+            @{name="B"; loops="1"; then="stop"; steps=@(
+              @{type="read"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="contains"; pattern="score"; on_yes="Go to sequence"; yes_seq="C"; on_no="Stop"; amin=0; amax=0},
+              @{type="key"; key="End"; amin=0; amax=0})},
+            @{name="C"; loops="1"; then="goto"; then_seq="D"; steps=@(@{type="key"; key="Page Down"; amin=0.2; amax=0.2})},
+            @{name="D"; loops="1"; then="stop"; steps=@(
+              @{type="read"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="contains"; pattern="banana"; on_yes="Continue"; on_no="Next sequence"; amin=0; amax=0})}
+          )
+          @{seqs=$seqs} | ConvertTo-Json -Depth 6 | Set-Content seq_chain.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_chain.json --seq A --start --no-settings --delay 1 --quit-when-done --log $pwd\chain_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue
+          "--- chain log"; Get-Content chain_log.txt
+          $order = (Get-Content chain_log.txt | ForEach-Object { $q = $_.Split(' '); "$($q[4]):$($q[5])" }) -join ','
+          "Order: $order"
+          $want = "switch:A,key:Home,key:Home,switch:B,read:match,switch:C,key:Page,switch:D,read:nomatch"
+          if ($order -ne $want) { throw "expected $want" }
+          "SEQUENCE SWITCH TEST PASSED"
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+
       - name: Screenshot Read step editor
         shell: pwsh
         run: |

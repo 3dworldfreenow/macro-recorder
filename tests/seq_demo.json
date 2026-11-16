@@ -67,7 +67,8 @@
      "amin": 1,
      "amax": 2
     }
-   ]
+   ],
+   "then": "next"
   },
   {
    "name": "Slideshow next",
@@ -82,7 +83,9 @@
      "amin": 3,
      "amax": 6
     }
-   ]
+   ],
+   "then": "goto",
+   "then_seq": "YouTube watch"
   },
   {
    "name": "Morning sites",

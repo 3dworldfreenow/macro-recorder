@@ -36,7 +36,7 @@ import time
 import webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from pynput import keyboard, mouse
 from pynput.keyboard import Key
@@ -456,7 +456,9 @@ def text_matches(st, text):
     return False
 
 
-ACTIONS = ["Continue", "Go to step", "Next loop", "Stop"]
+ACTIONS = ["Continue", "Go to step", "Next loop", "Stop", "Next sequence",
+           "Go to sequence"]
+WHEN_DONE = ["Stop", "Next sequence", "Go to sequence"]
 
 
 def rule_text(st):
@@ -473,6 +475,8 @@ def action_text(st, ok):
     a = st.get("on_yes" if ok else "on_no", "Continue")
     if a == "Go to step":
         return f"go to step {st.get('yes_step' if ok else 'no_step', 1)}"
+    if a == "Go to sequence":
+        return f"go to \u201c{st.get('yes_seq' if ok else 'no_seq', '?')}\u201d"
     return a.lower()
 
 
@@ -701,12 +705,53 @@ class Dialog(tk.Toplevel):
         return r
 
 
+class SeqPicker(Dialog):
+    """Tap one sequence name."""
+
+    def __init__(self, parent, names, current=""):
+        super().__init__(parent, "Choose sequence")
+        self.var = tk.StringVar(value=current if current in names
+                                else (names[0] if names else ""))
+        self.label(self.body, "Tap a sequence:").pack(anchor="w")
+        if names:
+            Choice(self.body, self.var, names, cols=2, size=12
+                   ).pack(fill="x", pady=4)
+        else:
+            self.label(self.body, "(no other sequences yet - make one in "
+                                  "My sequences)", bold=False).pack()
+        self.footer()
+
+    def ok(self):
+        self.result = self.var.get()
+        self.destroy()
+
+
+def seq_chooser(master, var, names, dialog_parent):
+    """Button showing the chosen sequence; tap to choose another."""
+    b = soft_button(master, "", None, size=12)
+
+    def draw(*a):
+        b.config(text=f"📂  {var.get() or '(choose)'}   ▾")
+
+    def pick():
+        lst = names() if callable(names) else list(names)
+        r = SeqPicker(dialog_parent, lst, var.get()).run()
+        if r:
+            var.set(r)
+
+    b.config(command=pick)
+    var.trace_add("write", draw)
+    draw()
+    return b
+
+
 class StepDialog(Dialog):
     """Add / edit one sequence step."""
 
-    def __init__(self, parent, step):
+    def __init__(self, parent, step, seq_names=()):
         super().__init__(parent, "Step")
         s = dict(step)
+        self.seq_names = list(seq_names)
         self.type = tk.StringVar(value={"click": "🖱 Click", "key": "⌨ Key",
                                         "link": "🔗 Link", "wait": "⏱ Wait",
                                         "read": "🔍 Read"}[s.get("type",
@@ -727,6 +772,9 @@ class StepDialog(Dialog):
         self.yes_step = tk.StringVar(value=str(s.get("yes_step", 1)))
         self.on_no = tk.StringVar(value=s.get("on_no", "Stop"))
         self.no_step = tk.StringVar(value=str(s.get("no_step", 1)))
+        first = self.seq_names[0] if self.seq_names else ""
+        self.yes_seq = tk.StringVar(value=s.get("yes_seq", first))
+        self.no_seq = tk.StringVar(value=s.get("no_seq", first))
         self.read_result = tk.StringVar(value="")
         self.x = tk.StringVar(value=str(s.get("x", 0)))
         self.y = tk.StringVar(value=str(s.get("y", 0)))
@@ -851,20 +899,25 @@ class StepDialog(Dialog):
         NumField(tm, self.timeout, step=1, maxv=3600, width=4
                  ).pack(side="left")
         self.label(tm, " sec").pack(side="left")
-        for title, var, stepv in (("✔ If it matches:", self.on_yes,
-                                   self.yes_step),
-                                  ("✖ If not:", self.on_no, self.no_step)):
+        for title, var, stepv, seqv in (
+                ("✔ If it matches:", self.on_yes, self.yes_step,
+                 self.yes_seq),
+                ("✖ If not:", self.on_no, self.no_step, self.no_seq)):
             self.label(self.after_match, title).pack(anchor="w", pady=(8, 0))
             row = tk.Frame(self.after_match, bg=self.BG)
             row.pack(fill="x")
-            Choice(row, var, ACTIONS, cols=4).pack(fill="x")
+            Choice(row, var, ACTIONS, cols=3, size=11).pack(fill="x")
             sr = tk.Frame(self.after_match, bg=self.BG)
             self.label(sr, "   step number: ", bold=False).pack(side="left")
             NumField(sr, stepv, step=1, minv=1, maxv=999, width=4
                      ).pack(side="left")
-            var.trace_add("write", lambda *a, v=var, f=sr, r=row:
-                          self._show_goto(v, f, r))
-            self._show_goto(var, sr, row)
+            qr = tk.Frame(self.after_match, bg=self.BG)
+            self.label(qr, "   sequence: ", bold=False).pack(side="left")
+            seq_chooser(qr, seqv, self.seq_names, self).pack(
+                side="left", fill="x", expand=True)
+            var.trace_add("write", lambda *a, v=var, f=sr, q=qr, r=row:
+                          self._show_goto(v, f, q, r))
+            self._show_goto(var, sr, qr, row)
         self.after_match.pack(fill="x")
         self.mmode.trace_add("write", lambda *a: self._show_match())
         self._show_match()
@@ -882,11 +935,13 @@ class StepDialog(Dialog):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
                 "⏱ Wait": "wait", "🔍 Read": "read"}[self.type.get()]
 
-    def _show_goto(self, var, frame, after):
+    def _show_goto(self, var, frame, qframe, after):
+        frame.pack_forget()
+        qframe.pack_forget()
         if var.get() == "Go to step":
             frame.pack(after=after, anchor="w", pady=(4, 0))
-        else:
-            frame.pack_forget()
+        elif var.get() == "Go to sequence":
+            qframe.pack(after=after, fill="x", pady=(4, 0))
 
     def _show_match(self):
         self.pat_row.pack_forget()
@@ -981,6 +1036,7 @@ class StepDialog(Dialog):
                       yes_step=max(1, int(fnum(self.yes_step.get(), 1))),
                       on_no=self.on_no.get(),
                       no_step=max(1, int(fnum(self.no_step.get(), 1))),
+                      yes_seq=self.yes_seq.get(), no_seq=self.no_seq.get(),
                       **self._read_rule())
             if st["mmode"] == "regex":
                 try:
@@ -1111,13 +1167,15 @@ class SeqListDialog(Dialog):
                    bold=False, fg="#555").pack(anchor="w")
         fr = tk.Frame(self.body, bg=self.BG)
         fr.pack(fill="both", expand=True, pady=6)
-        self.tv = ttk.Treeview(fr, columns=("n", "name", "steps", "rep"),
+        self.tv = ttk.Treeview(fr, columns=("n", "name", "steps", "rep",
+                                            "then"),
                                show="headings", height=7,
                                selectmode="browse")
         for c, t, w, a in (("n", "#", 40, "center"),
                            ("name", "Name", 260, "w"),
                            ("steps", "Steps", 80, "center"),
-                           ("rep", "Repeat", 100, "center")):
+                           ("rep", "Repeat", 100, "center"),
+                           ("then", "When finished", 150, "w")):
             self.tv.heading(c, text=t)
             self.tv.column(c, width=sz(w), anchor=a)
         sb = ttk.Scrollbar(fr, orient="vertical", command=self.tv.yview)
@@ -1132,11 +1190,18 @@ class SeqListDialog(Dialog):
                                       ("⧉ Copy", self.copy),
                                       ("🗑 Delete", self.delete),
                                       ("▲ Up", lambda: self.move(-1)),
-                                      ("▼ Down", lambda: self.move(1)))):
+                                      ("▼ Down", lambda: self.move(1)),
+                                      ("💾 Export all", self.export_all),
+                                      ("📥 Import", self.import_file),
+                                      ("📋 Copy all", self.copy_all),
+                                      ("📋 Paste", self.paste_all))):
             soft_button(g, t, cmd).grid(row=i // 3, column=i % 3,
                                         sticky="ew", padx=3, pady=3)
         for c in range(3):
             g.columnconfigure(c, weight=1, uniform="b")
+        self.info = self.label(self.body, "", size=10, bold=False,
+                               fg="#2e7d32")
+        self.info.pack(anchor="w", pady=(4, 0))
         self.refresh(app.cur)
         self.footer()
         self.ok_btn.config(text="✔  Open")
@@ -1156,7 +1221,9 @@ class SeqListDialog(Dialog):
             lp = int(fnum(sq.get("loops", 0)))
             self.tv.insert("", "end", iid=str(i), values=(
                 i + 1, ("▶ " if i == self.app.cur else "") + sq["name"],
-                len(sq["steps"]), "forever" if lp == 0 else f"{lp} times"))
+                len(sq["steps"]), "forever" if lp == 0 else f"{lp} times",
+                {"next": "→ next", "goto": f"→ {sq.get('then_seq', '?')}"}.get(
+                    sq.get("then"), "stop")))
         if select is not None and 0 <= select < len(self.app.seqs):
             self.tv.selection_set(str(select))
             self.tv.see(str(select))
@@ -1187,7 +1254,16 @@ class SeqListDialog(Dialog):
         name = NameDialog(self, "Rename sequence",
                           self.app.seqs[i]["name"]).run()
         if name:
+            old = self.app.seqs[i]["name"]
             self.app.seqs[i]["name"] = name
+            for sq in self.app.seqs:          # keep links to it working
+                if sq.get("then_seq") == old:
+                    sq["then_seq"] = name
+                for st in sq["steps"]:
+                    for k in ("yes_seq", "no_seq"):
+                        if st.get(k) == old:
+                            st[k] = name
+            self.app.switch_seq(self.app.cur, save=False)
             self.app._save_settings()
             self.app._update_seq_btn()
             self.refresh(i)
@@ -1242,6 +1318,85 @@ class SeqListDialog(Dialog):
             self.app._save_settings()
             self.refresh(j)
 
+    # ---- copy all / export / import
+    def _all_data(self):
+        self.app._sync_loops()
+        return {"keypresser_sequences": 1,
+                "seqs": json.loads(json.dumps(self.app.seqs))}
+
+    def _add_seqs(self, data):
+        """Add sequences from exported data; returns how many."""
+        if isinstance(data, dict):
+            data = data.get("seqs", [])
+        if not isinstance(data, list):
+            raise ValueError("not a KeyPresser sequences file")
+        new = [q for q in data if isinstance(q, dict) and "steps" in q]
+        if not new:
+            raise ValueError("no sequences found")
+        rename = {}
+        for q in new:
+            q.setdefault("name", "Imported")
+            q.setdefault("loops", "0")
+            nm = self.unique(q["name"])
+            rename[q["name"]] = nm
+            q["name"] = nm
+            self.app.seqs.append(q)
+        for q in new:                       # fix links between them
+            if q.get("then_seq") in rename:
+                q["then_seq"] = rename[q["then_seq"]]
+            for st in q["steps"]:
+                for k in ("yes_seq", "no_seq"):
+                    if st.get(k) in rename:
+                        st[k] = rename[st[k]]
+        self.app._save_settings()
+        self.refresh(len(self.app.seqs) - 1)
+        return len(new)
+
+    def export_all(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save all sequences",
+            defaultextension=".json", initialfile="my_sequences.json",
+            filetypes=[("Sequences", "*.json")])
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self._all_data(), f, indent=1,
+                              ensure_ascii=False)
+                self.info.config(text=f"✔ Saved {len(self.app.seqs)} "
+                                      f"sequences to {os.path.basename(path)}",
+                                 fg="#2e7d32")
+            except Exception as e:
+                self.info.config(text=f"✖ Could not save: {e}", fg=RED)
+
+    def import_file(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="Import sequences",
+            filetypes=[("Sequences", "*.json"), ("All files", "*.*")])
+        if path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    k = self._add_seqs(json.load(f))
+                self.info.config(text=f"✔ Imported {k} sequences",
+                                 fg="#2e7d32")
+            except Exception as e:
+                self.info.config(text=f"✖ Could not import: {e}", fg=RED)
+
+    def copy_all(self):
+        self.clipboard_clear()
+        self.clipboard_append(json.dumps(self._all_data(),
+                                         ensure_ascii=False))
+        self.info.config(text=f"✔ Copied {len(self.app.seqs)} sequences - "
+                              "paste them on another PC or in a message",
+                         fg="#2e7d32")
+
+    def paste_all(self):
+        try:
+            k = self._add_seqs(json.loads(self.clipboard_get()))
+            self.info.config(text=f"✔ Pasted {k} sequences", fg="#2e7d32")
+        except Exception as e:
+            self.info.config(text=f"✖ Clipboard has no sequences ({e})",
+                             fg=RED)
+
     def ok(self):
         i = self.sel()
         self.result = i if i is not None else self.app.cur
@@ -1275,12 +1430,8 @@ def describe(st):
         rule = (f"{st.get('op', '=')} {fmt(st.get('num', 0))}"
                 if mm == "number" else f"\u201c{st.get('pattern', '')}\u201d")
 
-        def act(a, n):
-            return f"step {n}" if a == "Go to step" else a.lower()
-
         return (f"🔍 Read ({st['x']}, {st['y']}) {mm} {rule} → "
-                f"✔ {act(st.get('on_yes', 'Continue'), st.get('yes_step'))}"
-                f" / ✖ {act(st.get('on_no', 'Stop'), st.get('no_step'))}")
+                f"✔ {action_text(st, True)} / ✖ {action_text(st, False)}")
     else:
         return "⏱ Wait"
     n = int(st.get("times", 1))
@@ -1536,6 +1687,24 @@ class App:
             value=str(self.seqs[self.cur].get("loops", "0")))
         NumField(lr, self.loops, step=1).pack(side="left")
         self._lbl(lr, "  times (0 = forever)").pack(side="left")
+        wd = tk.Frame(sq, bg=self.BG)
+        wd.pack(fill="x", pady=(6, 0))
+        self._lbl(wd, "When finished:  ", bold=True).pack(side="left")
+        cur_sq = self.seqs[self.cur]
+        self.then_var = tk.StringVar(value={"next": "Next sequence",
+                                            "goto": "Go to sequence"}.get(
+            cur_sq.get("then"), "Stop"))
+        self.then_seq = tk.StringVar(value=cur_sq.get("then_seq", ""))
+        Choice(wd, self.then_var, WHEN_DONE, cols=3, size=11
+               ).pack(side="left", fill="x", expand=True)
+        self.then_row = tk.Frame(sq, bg=self.BG)
+        self._lbl(self.then_row, "   then run:  ").pack(side="left")
+        seq_chooser(self.then_row, self.then_seq,
+                    lambda: [q["name"] for q in self.seqs], self.root
+                    ).pack(side="left", fill="x", expand=True)
+        self.then_var.trace_add("write", lambda *a: self._then_changed())
+        self.then_seq.trace_add("write", lambda *a: self._then_changed())
+        self._then_changed(save=False)
 
         # ---------------- Key timer tab
         kf = tk.Frame(self.nb, bg=self.BG, padx=14, pady=14)
@@ -1778,6 +1947,22 @@ class App:
             self.seq_btn.config(text=f"📂  {sq['name']}   "
                                 f"({len(sq['steps'])} steps)   ▾")
 
+    def _then_changed(self, save=True):
+        if getattr(self, "_switching", False) or not hasattr(self,
+                                                             "then_row"):
+            return
+        sq = self.seqs[self.cur]
+        sq["then"] = {"Next sequence": "next",
+                      "Go to sequence": "goto"}.get(self.then_var.get(),
+                                                    "stop")
+        sq["then_seq"] = self.then_seq.get()
+        if sq["then"] == "goto":
+            self.then_row.pack(fill="x", pady=(4, 0))
+        else:
+            self.then_row.pack_forget()
+        if save:
+            self._save_settings()
+
     def switch_seq(self, i, save=True):
         if 0 <= self.cur < len(self.seqs):
             self._sync_loops()
@@ -1785,6 +1970,14 @@ class App:
         self.steps = self.seqs[i]["steps"]
         if hasattr(self, "loops"):
             self.loops.set(str(self.seqs[i].get("loops", "0")))
+        if hasattr(self, "then_var"):
+            self._switching = True
+            self.then_var.set({"next": "Next sequence",
+                               "goto": "Go to sequence"}.get(
+                self.seqs[i].get("then"), "Stop"))
+            self.then_seq.set(self.seqs[i].get("then_seq", ""))
+            self._switching = False
+            self._then_changed(save=False)
         if hasattr(self, "stree"):
             self._refresh_steps()
         self._update_seq_btn()
@@ -1821,7 +2014,8 @@ class App:
             return
         base = {"type": "click", "x": 0, "y": 0, "button": "Left",
                 "times": 1, "tmin": 0.5, "tmax": 1, "amin": 0, "amax": 2}
-        st = StepDialog(self.root, base).run()
+        st = StepDialog(self.root, base,
+                        [q["name"] for q in self.seqs]).run()
         if st:
             i = self._sel(self.stree)
             pos = len(self.steps) if i is None else i + 1
@@ -1834,7 +2028,8 @@ class App:
             i = self._sel(self.stree)
         if i is None or self.running() or not (0 <= i < len(self.steps)):
             return
-        st = StepDialog(self.root, self.steps[i]).run()
+        st = StepDialog(self.root, self.steps[i],
+                        [q["name"] for q in self.seqs]).run()
         if st:
             self.steps[i] = st
             self._refresh_steps(select=i)
@@ -2048,9 +2243,9 @@ class App:
             if not self.steps:
                 self.status.set("Add at least one step first")
                 return
-            cfg = {"steps": [dict(s) for s in self.steps],
-                   "loops": max(0, int(fnum(self.loops.get()))),
-                   "delay": delay}
+            self._sync_loops()
+            cfg = {"seqs": json.loads(json.dumps(self.seqs)),
+                   "cur": self.cur, "delay": delay}
             target = lambda: self.work_sequence(cfg)
         else:
             kmin, kmax = sorted((max(0, fnum(self.kmin.get())),
@@ -2389,95 +2584,166 @@ class App:
 
     # sequence worker ----------------------------------------------------
     def work_sequence(self, cfg, test=False):
-        steps, loops = cfg["steps"], cfg["loops"]
+        """Run a sequence; Read steps or 'When finished' can switch to
+        another sequence."""
+        if "seqs" in cfg:
+            seqs, cur = cfg["seqs"], cfg["cur"]
+        else:
+            seqs = [{"name": "Test", "steps": cfg["steps"],
+                     "loops": cfg["loops"]}]
+            cur = 0
         n = {"click": 0, "key": 0, "link": 0, "read": 0}
         if not self.countdown(cfg["delay"]):
             self.q.put(("finished", "Stopped"))
             return
-        loop = 0
-        every = any(st.get("run") != "once" for st in steps)
-        while (loops == 0 or loop < loops) and not self.stop.is_set():
-            if loop >= 1 and not every:
-                break          # only "once" steps: nothing left to repeat
-            loop += 1
-            total = "∞" if loops == 0 else loops
-            i = 0
-            end_all = False
-            while i < len(steps) and not self.stop.is_set():
-                st = steps[i]
-                nxt = i + 1
-                if not test:
-                    self.q.put(("highlight", i))
-                if st.get("run") == "once" and loop > 1:
-                    i = nxt
-                    continue
-                nm = st.get("name") or ""
-                label = (f"Loop {loop}/{total} · step {i + 1}/{len(steps)}"
-                         + (f" · {nm}" if nm else ""))
-                self.q.put(("status", label))
-                self.q.put(("live", {
-                    "step": f"Loop {loop}/{total}  ·  Step {i + 1}/"
-                            f"{len(steps)}" + (f"  ·  {nm}" if nm else ""),
-                    "desc": describe(st)}))
-                t = st.get("type")
-                times = max(1, int(st.get("times", 1)))
-                if t in ("click", "key"):
-                    for k in range(times):
-                        if self.stop.is_set():
-                            break
-                        if t == "click":
-                            self.do_click(st["x"], st["y"],
-                                          st.get("button", "Left"), True)
-                            n["click"] += 1
-                            self.log(f"seq {loop} {i + 1} click "
-                                     f"{st['x']} {st['y']}")
-                        else:
-                            self.press_key(st.get("key"))
-                            n["key"] += 1
-                            self.log(f"seq {loop} {i + 1} key "
-                                     f"{st.get('key')}")
+
+        def find_seq(name):
+            for k, sq in enumerate(seqs):
+                if sq["name"].lower() == (name or "").lower():
+                    return k
+            return None
+
+        def target_seq(kind, name, here):
+            """index to switch to, or None = stop"""
+            if kind == "next":
+                return here + 1 if here + 1 < len(seqs) else None
+            if kind == "goto":
+                return find_seq(name)
+            return None
+
+        stop_reason = ""
+        while not self.stop.is_set():
+            sq = seqs[cur]
+            steps = sq["steps"]
+            loops = max(0, int(fnum(sq.get("loops", 0))))
+            sname = sq["name"]
+            self.log(f"seq 0 0 switch {sname}")
+            if not test:
+                self.q.put(("seqswitch", cur))
+            jump = None                  # sequence index to switch to
+            loop = 0
+            every = any(st.get("run") != "once" for st in steps)
+            while (loops == 0 or loop < loops) and not self.stop.is_set() \
+                    and steps and jump is None:
+                if loop >= 1 and not every:
+                    break      # only "once" steps: nothing left to repeat
+                loop += 1
+                total = "∞" if loops == 0 else loops
+                i = 0
+                while i < len(steps) and not self.stop.is_set():
+                    st = steps[i]
+                    nxt = i + 1
+                    if not test:
+                        self.q.put(("highlight", i))
+                    if st.get("run") == "once" and loop > 1:
+                        i = nxt
+                        continue
+                    nm = st.get("name") or ""
+                    label = (f"{sname} · loop {loop}/{total} · step "
+                             f"{i + 1}/{len(steps)}"
+                             + (f" · {nm}" if nm else ""))
+                    self.q.put(("status", label))
+                    self.q.put(("live", {
+                        "step": f"📂 {sname}  ·  Loop {loop}/{total}  ·  "
+                                f"Step {i + 1}/{len(steps)}"
+                                + (f"  ·  {nm}" if nm else ""),
+                        "desc": describe(st)}))
+                    t = st.get("type")
+                    times = max(1, int(st.get("times", 1)))
+                    leave_loop = False
+                    if t in ("click", "key"):
+                        for k in range(times):
+                            if self.stop.is_set():
+                                break
+                            if t == "click":
+                                self.do_click(st["x"], st["y"],
+                                              st.get("button", "Left"), True)
+                                n["click"] += 1
+                                self.log(f"seq {loop} {i + 1} click "
+                                         f"{st['x']} {st['y']}")
+                            else:
+                                self.press_key(st.get("key"))
+                                n["key"] += 1
+                                self.log(f"seq {loop} {i + 1} key "
+                                         f"{st.get('key')}")
+                            self.q.put(("count", n))
+                            if k < times - 1:
+                                self.wait(random.uniform(st.get("tmin", 0),
+                                                         st.get("tmax", 0)),
+                                          f"gap before "
+                                          f"{'click' if t == 'click' else 'key'}"
+                                          f" {k + 2} of {times}")
+                    elif t == "link":
+                        self.gate()
+                        open_link(st["url"])
+                        n["link"] += 1
+                        self.log(f"seq {loop} {i + 1} link {st['url']}")
                         self.q.put(("count", n))
-                        if k < times - 1:
-                            self.wait(random.uniform(st.get("tmin", 0),
-                                                     st.get("tmax", 0)),
-                                      f"gap before {'click' if t == 'click' else 'key'}"
-                                      f" {k + 2} of {times}")
-                elif t == "link":
-                    self.gate()
-                    open_link(st["url"])
-                    n["link"] += 1
-                    self.log(f"seq {loop} {i + 1} link {st['url']}")
-                    self.q.put(("count", n))
-                elif t == "read":
-                    ok, text, src = self.do_read(st, label)
-                    n["read"] = n.get("read", 0) + 1
-                    self.q.put(("count", n))
-                    self.q.put(("read", {"text": text, "src": src, "ok": ok,
-                                         "rule": rule_text(st), "final": True,
-                                         "action": action_text(st, ok)}))
-                    self.log(f"seq {loop} {i + 1} read "
-                             f"{'match' if ok else 'nomatch'} {text!r}")
-                    act = st.get("on_yes" if ok else "on_no", "Continue")
-                    short = (text[:40] + "…") if len(text) > 40 else text
-                    self.q.put(("status", f"{label} · read \u201c{short}\u201d"
-                                f" → {'✔' if ok else '✖'} {act}"))
-                    if act == "Stop":
-                        self.stop.set()
+                    elif t == "read":
+                        ok, text, src = self.do_read(st, label)
+                        n["read"] = n.get("read", 0) + 1
+                        self.q.put(("count", n))
+                        self.q.put(("read", {
+                            "text": text, "src": src, "ok": ok,
+                            "rule": rule_text(st), "final": True,
+                            "action": action_text(st, ok)}))
+                        self.log(f"seq {loop} {i + 1} read "
+                                 f"{'match' if ok else 'nomatch'} {text!r}")
+                        act = st.get("on_yes" if ok else "on_no", "Continue")
+                        short = (text[:40] + "…") if len(text) > 40 else text
+                        self.q.put(("status", f"{label} · read \u201c{short}"
+                                    f"\u201d → {'✔' if ok else '✖'} "
+                                    f"{action_text(st, ok)}"))
+                        if act == "Stop":
+                            stop_reason = "stopped by Read step"
+                            self.stop.set()
+                            break
+                        if act == "Next loop":
+                            leave_loop = True
+                        elif act == "Go to step":
+                            tgt = int(st.get("yes_step" if ok else "no_step",
+                                             1))
+                            nxt = min(max(1, tgt), len(steps)) - 1
+                        elif act in ("Next sequence", "Go to sequence"):
+                            j = target_seq(
+                                "next" if act == "Next sequence" else "goto",
+                                st.get("yes_seq" if ok else "no_seq"), cur)
+                            if j is None:
+                                stop_reason = ("no next sequence"
+                                               if act == "Next sequence" else
+                                               "sequence not found")
+                                self.stop.set()
+                                break
+                            jump = j
+                    gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
+                    if gap > 0 and not self.stop.is_set():
+                        self.q.put(("status", f"{label} · waiting "
+                                              f"{gap:.1f}s"))
+                        self.wait(gap, "wait before next step")
+                    if leave_loop or jump is not None:
                         break
-                    if act == "Next loop":
-                        break
-                    if act == "Go to step":
-                        tgt = int(st.get("yes_step" if ok else "no_step", 1))
-                        nxt = min(max(1, tgt), len(steps)) - 1
-                gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
-                if gap > 0 and not self.stop.is_set():
-                    self.q.put(("status", f"{label} · waiting {gap:.1f}s"))
-                    self.wait(gap, "wait before next step")
-                i = nxt
-            if end_all:
+                    i = nxt
+            if self.stop.is_set():
                 break
+            if jump is None:
+                # all loops done: what next?
+                then = sq.get("then", "stop")
+                if then in ("next", "goto"):
+                    jump = target_seq(then, sq.get("then_seq"), cur)
+                    if jump is None:
+                        stop_reason = ("last sequence" if then == "next"
+                                       else "sequence not found")
+                        break
+                else:
+                    break
+            if test:
+                break
+            cur = jump
+            self.wait(0.05)
         done = (f"{n['click']} clicks, {n['key']} key presses, "
-                f"{n['link']} links")
+                f"{n['link']} links, {n['read']} reads")
+        if stop_reason and not test:
+            done += f" ({stop_reason})"
         self.q.put(("finished", ("Stopped · " if self.stop.is_set()
                                  else "Done · ") + done))
 
@@ -2608,6 +2874,9 @@ class App:
                         self.live["counts"] = dict(val)
                     self.count_var.set(self._counts_text())
                     self._refresh_mini()
+                elif msg == "seqswitch":
+                    if 0 <= val < len(self.seqs) and val != self.cur:
+                        self.switch_seq(val, save=False)
                 elif msg == "live":
                     self.live.update(val)
                     self._refresh_mini()
