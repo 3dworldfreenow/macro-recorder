@@ -400,7 +400,7 @@ jobs:
           "--- chain log"; Get-Content chain_log.txt
           $order = (Get-Content chain_log.txt | ForEach-Object { $q = $_.Split(' '); "$($q[4]):$($q[5])" }) -join ','
           "Order: $order"
-          $want = "switch:A,key:Home,key:Home,switch:B,read:match,switch:C,key:Page,switch:D,read:nomatch"
+          $want = "key:Home,key:Home,switch:B,read:match,switch:C,key:Page,switch:D,read:nomatch"
           if ($order -ne $want) { throw "expected $want" }
           "SEQUENCE SWITCH TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process

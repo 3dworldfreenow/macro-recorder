@@ -2612,12 +2612,15 @@ class App:
             return None
 
         stop_reason = ""
+        switched = False
         while not self.stop.is_set():
             sq = seqs[cur]
             steps = sq["steps"]
             loops = max(0, int(fnum(sq.get("loops", 0))))
             sname = sq["name"]
-            self.log(f"seq 0 0 switch {sname}")
+            if switched:
+                self.log(f"seq 0 0 switch {sname}")
+            switched = True
             if not test:
                 self.q.put(("seqswitch", cur))
             jump = None                  # sequence index to switch to
