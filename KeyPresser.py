@@ -456,6 +456,14 @@ def text_matches(st, text):
     return False
 
 
+def all_steps(steps):
+    """Every step, including the sub-steps inside groups."""
+    for st in steps:
+        yield st
+        if st.get("type") == "group":
+            yield from all_steps(st.get("steps", []))
+
+
 def set_clipboard_text(text):
     """Put Unicode text on the Windows clipboard (works from any thread)."""
     from ctypes import wintypes as wt
@@ -709,17 +717,29 @@ class Dialog(tk.Toplevel):
                 pass
         return self.result
 
+    def chain(self):
+        """This dialog, the dialogs under it, and the main window."""
+        wins, w = [self], self.parent
+        while w is not None:
+            wins.append(w)
+            w = w.parent if isinstance(w, Dialog) else None
+        return wins
+
     def pick_into(self, xvar, yvar):
         self.grab_release()
+        wins = self.chain()
 
         def done(x, y):
             if x is not None:
                 xvar.set(str(int(x)))
                 yvar.set(str(int(y)))
+            for w in reversed(wins[1:]):
+                w.deiconify()
+            self.deiconify()
             self.lift()
             self.grab_set()
 
-        pick_on_screen(self.parent, done, hide=(self, self.parent))
+        pick_on_screen(wins[-1], done, hide=wins)
 
     def wait_row(self, master, amin, amax, text="Then wait (sec):"):
         r = tk.Frame(master, bg=self.BG)
@@ -804,8 +824,10 @@ class StepDialog(Dialog):
         self.type = tk.StringVar(value={"click": "🖱 Click", "key": "⌨ Key",
                                         "link": "🔗 Link", "wait": "⏱ Wait",
                                         "read": "🔍 Read",
-                                        "paste": "📋 Paste"}[s.get("type",
+                                        "paste": "📋 Paste",
+                                        "group": "🗂 Group"}[s.get("type",
                                                                   "click")])
+        self.g_steps = json.loads(json.dumps(s.get("steps", [])))
         self.p_click = tk.BooleanVar(value=s.get("click_first", True))
         self.cx = tk.StringVar(value=str(s.get("cx", 0)))
         self.cy = tk.StringVar(value=str(s.get("cy", 0)))
@@ -876,8 +898,8 @@ class StepDialog(Dialog):
                cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
         Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait",
-                              "🔍 Read", "📋 Paste"],
-               cols=3, size=12).pack(fill="x", pady=(4, 10))
+                              "🔍 Read", "📋 Paste", "🗂 Group"],
+               cols=4, size=11).pack(fill="x", pady=(4, 10))
 
         self.area = tk.Frame(b, bg=self.BG)
         self.area.pack(fill="both", expand=True)
@@ -991,6 +1013,44 @@ class StepDialog(Dialog):
         self.mmode.trace_add("write", lambda *a: self._show_match())
         self._show_match()
 
+        # --- group panel (sub-steps)
+        gp = self.group_panel = tk.Frame(self.area, bg=self.BG)
+        self.label(gp, "Sub-steps (run top to bottom, each with all step "
+                       "features):", size=11).pack(anchor="w")
+        gf = tk.Frame(gp, bg=self.BG)
+        gf.pack(fill="x", pady=4)
+        self.gtree = ttk.Treeview(gf, columns=("n", "name", "step", "wait"),
+                                  show="headings", height=4,
+                                  selectmode="browse")
+        for c, t_, w_, a_ in (("n", "#", 34, "center"),
+                              ("name", "Name", 90, "w"),
+                              ("step", "Step", 230, "w"),
+                              ("wait", "Then wait", 80, "center")):
+            self.gtree.heading(c, text=t_)
+            self.gtree.column(c, width=sz(w_), anchor=a_,
+                              stretch=(a_ == "w"))
+        gsb = ttk.Scrollbar(gf, orient="vertical", command=self.gtree.yview)
+        self.gtree.configure(yscrollcommand=gsb.set)
+        self.gtree.pack(side="left", fill="x", expand=True)
+        gsb.pack(side="right", fill="y")
+        self.gtree.bind("<Double-1>", lambda e: self.g_edit())
+        big_button(gp, "➕  Add sub-step", self.g_add, bg=GREEN, abg=GREEN_A,
+                   size=12, pady=8).pack(fill="x", pady=(2, 4))
+        gb = tk.Frame(gp, bg=self.BG)
+        gb.pack(fill="x", pady=(0, 6))
+        for k_, (t_, cmd) in enumerate((("✏ Edit", self.g_edit),
+                                        ("🗑 Delete", self.g_delete),
+                                        ("▲ Up", lambda: self.g_move(-1)),
+                                        ("▼ Down", lambda: self.g_move(1)),
+                                        ("⧉ Copy", self.g_copy))):
+            soft_button(gb, t_, cmd, size=10, padx=3).grid(
+                row=0, column=k_, sticky="ew", padx=2)
+            gb.columnconfigure(k_, weight=1, uniform="g")
+        self.label(gp, "Inside a group, a Read step's \u201cGo to step\u201d "
+                       "means a sub-step number.", size=10, bold=False,
+                   fg="#666").pack(anchor="w")
+        self.g_refresh()
+
         # --- paste panel
         pp = self.paste_panel = tk.Frame(self.area, bg=self.BG)
         self.p_toggle = Toggle(pp, "Click a spot first (e.g. the text box)",
@@ -1098,7 +1158,7 @@ class StepDialog(Dialog):
     def kind(self):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
                 "⏱ Wait": "wait", "🔍 Read": "read",
-                "📋 Paste": "paste"}[self.type.get()]
+                "📋 Paste": "paste", "🗂 Group": "group"}[self.type.get()]
 
     def _show_goto(self, var, frame, qframe, after):
         frame.pack_forget()
@@ -1134,7 +1194,7 @@ class StepDialog(Dialog):
         method = {"Windows text": "uia", "OCR (picture)": "ocr"}.get(
             self.method.get(), "auto")
         rule = self._read_rule()
-        wins = (self, self.parent)
+        wins = self.chain()
         for w in wins:
             w.withdraw()
         self.update()
@@ -1154,6 +1214,61 @@ class StepDialog(Dialog):
         else:
             self.read_result.set("No text found" + (f" ({err})" if err
                                                      else ""))
+
+    # ---- group sub-steps
+    def g_refresh(self, select=None):
+        self.gtree.delete(*self.gtree.get_children())
+        for k, st in enumerate(self.g_steps):
+            self.gtree.insert("", "end", iid=str(k), values=(
+                k + 1, st.get("name", ""), describe(st),
+                span(st.get("amin", 0), st.get("amax", 0)) + " s"))
+        if select is not None and 0 <= select < len(self.g_steps):
+            self.gtree.selection_set(str(select))
+            self.gtree.see(str(select))
+
+    def g_sel(self):
+        sel = self.gtree.selection()
+        return int(sel[0]) if sel else None
+
+    def g_add(self):
+        base = {"type": "click", "x": 0, "y": 0, "button": "Left",
+                "times": 1, "tmin": 0.5, "tmax": 1, "amin": 0, "amax": 1}
+        st = StepDialog(self, base, self.seq_names).run()
+        if st:
+            i = self.g_sel()
+            pos = len(self.g_steps) if i is None else i + 1
+            self.g_steps.insert(pos, st)
+            self.g_refresh(pos)
+
+    def g_edit(self):
+        i = self.g_sel()
+        if i is None:
+            return
+        st = StepDialog(self, self.g_steps[i], self.seq_names).run()
+        if st:
+            self.g_steps[i] = st
+            self.g_refresh(i)
+
+    def g_delete(self):
+        i = self.g_sel()
+        if i is not None:
+            del self.g_steps[i]
+            self.g_refresh(min(i, len(self.g_steps) - 1))
+
+    def g_move(self, d):
+        i = self.g_sel()
+        if i is None:
+            return
+        j = i + d
+        if 0 <= j < len(self.g_steps):
+            self.g_steps[i], self.g_steps[j] = self.g_steps[j], self.g_steps[i]
+            self.g_refresh(j)
+
+    def g_copy(self):
+        i = self.g_sel()
+        if i is not None:
+            self.g_steps.insert(i + 1, json.loads(json.dumps(self.g_steps[i])))
+            self.g_refresh(i + 1)
 
     def add_pair(self, find="", paste=""):
         f = tk.Frame(self.pairs_box, bg=self.BG)
@@ -1204,7 +1319,7 @@ class StepDialog(Dialog):
             self.method.get(), "auto")
         mode = self.p_mode.get().lower()
         pairs = self._pairs()
-        wins = (self, self.parent)
+        wins = self.chain()
         for w in wins:
             w.withdraw()
         self.update()
@@ -1229,7 +1344,8 @@ class StepDialog(Dialog):
 
     def show(self):
         for p in (self.click_panel, self.key_panel, self.repeat_panel,
-                  self.link_panel, self.read_panel, self.paste_panel):
+                  self.link_panel, self.read_panel, self.paste_panel,
+                  self.group_panel):
             p.pack_forget()
         k = self.kind()
         if k == "click":
@@ -1244,6 +1360,9 @@ class StepDialog(Dialog):
             self.read_panel.pack(fill="x")
         elif k == "paste":
             self.paste_panel.pack(fill="x")
+        elif k == "group":
+            self.group_panel.pack(fill="x")
+            self.repeat_panel.pack(fill="x")
 
     def ok(self):
         k = self.kind()
@@ -1253,7 +1372,13 @@ class StepDialog(Dialog):
               "name": self.name.get().strip(),
               "run": ("once" if self.run_mode.get().startswith("Only")
                       else "every")}
-        if k in ("click", "key"):
+        if k == "group":
+            if not self.g_steps:
+                messagebox.showerror("Step", "Add at least one sub-step",
+                                     parent=self)
+                return
+            st["steps"] = self.g_steps
+        if k in ("click", "key", "group"):
             tmin, tmax = sorted((max(0, fnum(self.tmin.get())),
                                  max(0, fnum(self.tmax.get()))))
             st.update(times=max(1, int(fnum(self.times.get(), 1))),
@@ -1529,7 +1654,7 @@ class SeqListDialog(Dialog):
             for sq in self.app.seqs:          # keep links to it working
                 if sq.get("then_seq") == old:
                     sq["then_seq"] = name
-                for st in sq["steps"]:
+                for st in all_steps(sq["steps"]):
                     for k in ("yes_seq", "no_seq"):
                         if st.get(k) == old:
                             st[k] = name
@@ -1614,7 +1739,7 @@ class SeqListDialog(Dialog):
         for q in new:                       # fix links between them
             if q.get("then_seq") in rename:
                 q["then_seq"] = rename[q["then_seq"]]
-            for st in q["steps"]:
+            for st in all_steps(q["steps"]):
                 for k in ("yes_seq", "no_seq"):
                     if st.get(k) in rename:
                         st[k] = rename[st[k]]
@@ -1695,6 +1820,12 @@ def describe(st):
         d = f"⌨ {st.get('key')}"
     elif t == "link":
         d = f"🔗 {st.get('url')}"
+    elif t == "group":
+        subs = st.get("steps", [])
+        names = ", ".join(q.get("name") or describe(q)[:2].strip()
+                          for q in subs[:4])
+        d = (f"🗂 Group ({len(subs)} sub-step{'s' if len(subs) != 1 else ''})"
+             + (f": {names}{'…' if len(subs) > 4 else ''}" if names else ""))
     elif t == "paste":
         if st.get("source") == "ocr":
             d = (f"📋 Paste by reading ({st.get('x')}, {st.get('y')}): "
@@ -1717,7 +1848,7 @@ def describe(st):
     else:
         return "⏱ Wait"
     n = int(st.get("times", 1))
-    if t in ("click", "key") and n > 1:
+    if t in ("click", "key", "group") and n > 1:
         d += f"  × {n}  (gap {span(st.get('tmin', 0), st.get('tmax', 0))}s)"
     return d
 
@@ -2903,44 +3034,30 @@ class App:
     # sequence worker ----------------------------------------------------
     def work_sequence(self, cfg, test=False):
         """Run a sequence; Read steps or 'When finished' can switch to
-        another sequence."""
+        another sequence. Group steps run their own sub-steps."""
         if "seqs" in cfg:
             seqs, cur = cfg["seqs"], cfg["cur"]
         else:
             seqs = [{"name": "Test", "steps": cfg["steps"],
                      "loops": cfg["loops"]}]
             cur = 0
-        n = {"click": 0, "key": 0, "link": 0, "read": 0}
+        n = {"click": 0, "key": 0, "link": 0, "read": 0, "paste": 0}
         if not self.countdown(cfg["delay"]):
             self.q.put(("finished", "Stopped"))
             return
-
-        def find_seq(name):
-            for k, sq in enumerate(seqs):
-                if sq["name"].lower() == (name or "").lower():
-                    return k
-            return None
-
-        def target_seq(kind, name, here):
-            """index to switch to, or None = stop"""
-            if kind == "next":
-                return here + 1 if here + 1 < len(seqs) else None
-            if kind == "goto":
-                return find_seq(name)
-            return None
-
-        stop_reason = ""
+        ctx = {"seqs": seqs, "cur": cur, "n": n, "test": test,
+               "stop_reason": "", "loop": 0, "total": "", "sname": ""}
         switched = False
         while not self.stop.is_set():
-            sq = seqs[cur]
+            sq = seqs[ctx["cur"]]
             steps = sq["steps"]
             loops = max(0, int(fnum(sq.get("loops", 0))))
-            sname = sq["name"]
+            ctx["sname"] = sq["name"]
             if switched:
-                self.log(f"seq 0 0 switch {sname}")
+                self.log(f"seq 0 0 switch {sq['name']}")
             switched = True
             if not test:
-                self.q.put(("seqswitch", cur))
+                self.q.put(("seqswitch", ctx["cur"]))
             jump = None                  # sequence index to switch to
             loop = 0
             every = any(st.get("run") != "once" for st in steps)
@@ -2949,178 +3066,209 @@ class App:
                 if loop >= 1 and not every:
                     break      # only "once" steps: nothing left to repeat
                 loop += 1
-                total = "∞" if loops == 0 else loops
-                i = 0
-                while i < len(steps) and not self.stop.is_set():
-                    st = steps[i]
-                    nxt = i + 1
-                    if not test:
-                        self.q.put(("highlight", i))
-                    if st.get("run") == "once" and loop > 1:
-                        i = nxt
-                        continue
-                    nm = st.get("name") or ""
-                    label = (f"{sname} · loop {loop}/{total} · step "
-                             f"{i + 1}/{len(steps)}"
-                             + (f" · {nm}" if nm else ""))
-                    self.q.put(("status", label))
-                    self.q.put(("live", {
-                        "step": f"📂 {sname}  ·  Loop {loop}/{total}  ·  "
-                                f"Step {i + 1}/{len(steps)}"
-                                + (f"  ·  {nm}" if nm else ""),
-                        "desc": describe(st)}))
-                    t = st.get("type")
-                    times = max(1, int(st.get("times", 1)))
-                    leave_loop = False
-                    if t in ("click", "key"):
-                        for k in range(times):
-                            if self.stop.is_set():
-                                break
-                            if t == "click":
-                                self.do_click(st["x"], st["y"],
-                                              st.get("button", "Left"), True)
-                                n["click"] += 1
-                                self.log(f"seq {loop} {i + 1} click "
-                                         f"{st['x']} {st['y']}")
-                            else:
-                                self.press_key(st.get("key"))
-                                n["key"] += 1
-                                self.log(f"seq {loop} {i + 1} key "
-                                         f"{st.get('key')}")
-                            self.q.put(("count", n))
-                            if k < times - 1:
-                                self.wait(random.uniform(st.get("tmin", 0),
-                                                         st.get("tmax", 0)),
-                                          f"gap before "
-                                          f"{'click' if t == 'click' else 'key'}"
-                                          f" {k + 2} of {times}")
-                    elif t == "link":
-                        self.gate()
-                        open_link(st["url"])
-                        n["link"] += 1
-                        self.log(f"seq {loop} {i + 1} link {st['url']}")
-                        self.q.put(("count", n))
-                    elif t == "paste":
-                        out, why, rtext = None, "", ""
-                        if st.get("source") == "ocr":
-                            self.gate()
-                            mode = st.get("pmode", "contains")
-                            pairs = st.get("pairs", [])
-                            rtext, src, err = self.read_at(
-                                st.get("x", 0), st.get("y", 0),
-                                fnum(st.get("aw", 300)),
-                                fnum(st.get("ah", 60)),
-                                st.get("method", "auto"),
-                                want=lambda tx: any(
-                                    pair_matches(mode, pr["find"], tx)
-                                    for pr in pairs))
-                            hit = next((pr for pr in pairs if pair_matches(
-                                mode, pr["find"], rtext)), None)
-                            n["read"] = n.get("read", 0) + 1
-                            if hit:
-                                out = hit["paste"]
-                                why = f"pair \u201c{hit['find']}\u201d"
-                            elif st.get("nomatch") == "stop":
-                                why = "no pair matched → stop"
-                            elif st.get("nomatch") == "skip":
-                                why = "no pair matched → skip"
-                            else:
-                                out = st.get("default", "")
-                                why = "no pair matched → default"
-                            self.q.put(("read", {
-                                "text": rtext, "src": src, "ok": bool(hit),
-                                "rule": f"{len(pairs)} pair(s), {mode}",
-                                "final": True,
-                                "action": (f"paste \u201c{fill_placeholders(out, rtext)[:30]}\u201d"
-                                           if out is not None else why)}))
-                        else:
-                            out = st.get("text", "")
-                        if out is not None:
-                            out = fill_placeholders(out, rtext)
-                            if st.get("click_first"):
-                                self.do_click(st.get("cx", 0), st.get("cy", 0),
-                                              "Left", True)
-                                time.sleep(0.15)
-                            self.paste_text(out, st.get("how", "paste"))
-                            if st.get("enter"):
-                                self.press_key("Enter")
-                            n["paste"] = n.get("paste", 0) + 1
-                            self.log(f"seq {loop} {i + 1} paste {out!r}")
-                        else:
-                            self.log(f"seq {loop} {i + 1} pastenone "
-                                     f"{st.get('nomatch')}")
-                        self.q.put(("count", n))
-                        if out is None and st.get("nomatch") == "stop":
-                            stop_reason = "Paste step: no pair matched"
-                            self.stop.set()
-                            break
-                    elif t == "read":
-                        ok, text, src = self.do_read(st, label)
-                        n["read"] = n.get("read", 0) + 1
-                        self.q.put(("count", n))
-                        self.q.put(("read", {
-                            "text": text, "src": src, "ok": ok,
-                            "rule": rule_text(st), "final": True,
-                            "action": action_text(st, ok)}))
-                        self.log(f"seq {loop} {i + 1} read "
-                                 f"{'match' if ok else 'nomatch'} {text!r}")
-                        act = st.get("on_yes" if ok else "on_no", "Continue")
-                        short = (text[:40] + "…") if len(text) > 40 else text
-                        self.q.put(("status", f"{label} · read \u201c{short}"
-                                    f"\u201d → {'✔' if ok else '✖'} "
-                                    f"{action_text(st, ok)}"))
-                        if act == "Stop":
-                            stop_reason = "stopped by Read step"
-                            self.stop.set()
-                            break
-                        if act == "Next loop":
-                            leave_loop = True
-                        elif act == "Go to step":
-                            tgt = int(st.get("yes_step" if ok else "no_step",
-                                             1))
-                            nxt = min(max(1, tgt), len(steps)) - 1
-                        elif act in ("Next sequence", "Go to sequence"):
-                            j = target_seq(
-                                "next" if act == "Next sequence" else "goto",
-                                st.get("yes_seq" if ok else "no_seq"), cur)
-                            if j is None:
-                                stop_reason = ("no next sequence"
-                                               if act == "Next sequence" else
-                                               "sequence not found")
-                                self.stop.set()
-                                break
-                            jump = j
-                    gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
-                    if gap > 0 and not self.stop.is_set():
-                        self.q.put(("status", f"{label} · waiting "
-                                              f"{gap:.1f}s"))
-                        self.wait(gap, "wait before next step")
-                    if leave_loop or jump is not None:
-                        break
-                    i = nxt
+                ctx["loop"] = loop
+                ctx["total"] = "∞" if loops == 0 else loops
+                sig = self.exec_steps(steps, ctx, "")
+                if isinstance(sig, tuple):           # ("seq", index)
+                    jump = sig[1]
             if self.stop.is_set():
                 break
             if jump is None:
-                # all loops done: what next?
                 then = sq.get("then", "stop")
                 if then in ("next", "goto"):
-                    jump = target_seq(then, sq.get("then_seq"), cur)
+                    jump = self._target_seq(seqs, then, sq.get("then_seq"),
+                                            ctx["cur"])
                     if jump is None:
-                        stop_reason = ("last sequence" if then == "next"
-                                       else "sequence not found")
+                        ctx["stop_reason"] = ("last sequence" if then ==
+                                              "next" else "sequence not found")
                         break
                 else:
                     break
             if test:
                 break
-            cur = jump
+            ctx["cur"] = jump
             self.wait(0.05)
         done = (f"{n['click']} clicks, {n['key']} key presses, "
                 f"{n['link']} links, {n['read']} reads")
-        if stop_reason and not test:
-            done += f" ({stop_reason})"
+        if n.get("paste"):
+            done += f", {n['paste']} pastes"
+        if ctx["stop_reason"] and not test:
+            done += f" ({ctx['stop_reason']})"
         self.q.put(("finished", ("Stopped · " if self.stop.is_set()
                                  else "Done · ") + done))
+
+    @staticmethod
+    def _target_seq(seqs, kind, name, here):
+        """index to switch to, or None (= stop)"""
+        if kind == "next":
+            return here + 1 if here + 1 < len(seqs) else None
+        if kind == "goto":
+            for k, sq in enumerate(seqs):
+                if sq["name"].lower() == (name or "").lower():
+                    return k
+        return None
+
+    def _halt(self, ctx, reason):
+        ctx["stop_reason"] = reason
+        self.stop.set()
+        return "stop"
+
+    def exec_steps(self, steps, ctx, prefix):
+        """Run a list of steps (the sequence, or a group's sub-steps).
+        Returns None (finished), 'nextloop', ('seq', index) or 'stop'."""
+        n, loop = ctx["n"], ctx["loop"]
+        i = 0
+        while i < len(steps) and not self.stop.is_set():
+            st = steps[i]
+            nxt = i + 1
+            sid = f"{prefix}{i + 1}"
+            if not ctx["test"] and not prefix:
+                self.q.put(("highlight", i))
+            if st.get("run") == "once" and loop > 1:
+                i = nxt
+                continue
+            nm = st.get("name") or ""
+            label = (f"{ctx['sname']} · loop {loop}/{ctx['total']} · step "
+                     f"{sid}" + (f" · {nm}" if nm else ""))
+            self.q.put(("status", label))
+            self.q.put(("live", {
+                "step": f"📂 {ctx['sname']}  ·  Loop {loop}/{ctx['total']}  ·  "
+                        f"Step {sid}" + (f"  ·  {nm}" if nm else ""),
+                "desc": describe(st)}))
+            t = st.get("type")
+            times = max(1, int(st.get("times", 1)))
+            sig = None
+            if t in ("click", "key"):
+                for k in range(times):
+                    if self.stop.is_set():
+                        break
+                    if t == "click":
+                        self.do_click(st["x"], st["y"],
+                                      st.get("button", "Left"), True)
+                        n["click"] += 1
+                        self.log(f"seq {loop} {sid} click {st['x']} {st['y']}")
+                    else:
+                        self.press_key(st.get("key"))
+                        n["key"] += 1
+                        self.log(f"seq {loop} {sid} key {st.get('key')}")
+                    self.q.put(("count", n))
+                    if k < times - 1:
+                        self.wait(random.uniform(st.get("tmin", 0),
+                                                 st.get("tmax", 0)),
+                                  f"gap before "
+                                  f"{'click' if t == 'click' else 'key'}"
+                                  f" {k + 2} of {times}")
+            elif t == "group":
+                for k in range(times):
+                    if self.stop.is_set():
+                        break
+                    self.log(f"seq {loop} {sid} group {k + 1}/{times}")
+                    sig = self.exec_steps(st.get("steps", []), ctx, f"{sid}.")
+                    if sig:
+                        break
+                    if k < times - 1:
+                        self.wait(random.uniform(st.get("tmin", 0),
+                                                 st.get("tmax", 0)),
+                                  f"gap before group repeat {k + 2} of "
+                                  f"{times}")
+            elif t == "link":
+                self.gate()
+                open_link(st["url"])
+                n["link"] += 1
+                self.log(f"seq {loop} {sid} link {st['url']}")
+                self.q.put(("count", n))
+            elif t == "paste":
+                out, why, rtext = None, "", ""
+                if st.get("source") == "ocr":
+                    self.gate()
+                    mode = st.get("pmode", "contains")
+                    pairs = st.get("pairs", [])
+                    rtext, src, err = self.read_at(
+                        st.get("x", 0), st.get("y", 0),
+                        fnum(st.get("aw", 300)), fnum(st.get("ah", 60)),
+                        st.get("method", "auto"),
+                        want=lambda tx: any(pair_matches(mode, pr["find"], tx)
+                                            for pr in pairs))
+                    hit = next((pr for pr in pairs
+                                if pair_matches(mode, pr["find"], rtext)),
+                               None)
+                    n["read"] += 1
+                    if hit:
+                        out = hit["paste"]
+                    elif st.get("nomatch") == "stop":
+                        why = "no pair matched → stop"
+                    elif st.get("nomatch") == "skip":
+                        why = "no pair matched → skip"
+                    else:
+                        out = st.get("default", "")
+                    self.q.put(("read", {
+                        "text": rtext, "src": src, "ok": bool(hit),
+                        "rule": f"{len(pairs)} pair(s), {mode}",
+                        "final": True,
+                        "action": (f"paste \u201c"
+                                   f"{fill_placeholders(out, rtext)[:30]}"
+                                   f"\u201d" if out is not None else why)}))
+                else:
+                    out = st.get("text", "")
+                if out is not None:
+                    out = fill_placeholders(out, rtext)
+                    if st.get("click_first"):
+                        self.do_click(st.get("cx", 0), st.get("cy", 0),
+                                      "Left", True)
+                        time.sleep(0.15)
+                    self.paste_text(out, st.get("how", "paste"))
+                    if st.get("enter"):
+                        self.press_key("Enter")
+                    n["paste"] += 1
+                    self.log(f"seq {loop} {sid} paste {out!r}")
+                else:
+                    self.log(f"seq {loop} {sid} pastenone "
+                             f"{st.get('nomatch')}")
+                self.q.put(("count", n))
+                if out is None and st.get("nomatch") == "stop":
+                    return self._halt(ctx, "Paste step: no pair matched")
+            elif t == "read":
+                ok, text, src = self.do_read(st, label)
+                n["read"] += 1
+                self.q.put(("count", n))
+                self.q.put(("read", {
+                    "text": text, "src": src, "ok": ok,
+                    "rule": rule_text(st), "final": True,
+                    "action": action_text(st, ok)}))
+                self.log(f"seq {loop} {sid} read "
+                         f"{'match' if ok else 'nomatch'} {text!r}")
+                act = st.get("on_yes" if ok else "on_no", "Continue")
+                short = (text[:40] + "…") if len(text) > 40 else text
+                self.q.put(("status", f"{label} · read \u201c{short}\u201d → "
+                                      f"{'✔' if ok else '✖'} "
+                                      f"{action_text(st, ok)}"))
+                if act == "Stop":
+                    return self._halt(ctx, "stopped by Read step")
+                if act == "Next loop":
+                    sig = "nextloop"
+                elif act == "Go to step":
+                    tgt = int(st.get("yes_step" if ok else "no_step", 1))
+                    nxt = min(max(1, tgt), len(steps)) - 1
+                elif act in ("Next sequence", "Go to sequence"):
+                    j = self._target_seq(
+                        ctx["seqs"],
+                        "next" if act == "Next sequence" else "goto",
+                        st.get("yes_seq" if ok else "no_seq"), ctx["cur"])
+                    if j is None:
+                        return self._halt(
+                            ctx, "no next sequence" if act == "Next sequence"
+                            else "sequence not found")
+                    sig = ("seq", j)
+            if self.stop.is_set():
+                return "stop"
+            gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
+            if gap > 0:
+                self.q.put(("status", f"{label} · waiting {gap:.1f}s"))
+                self.wait(gap, "wait before next step")
+            if sig:
+                return sig
+            i = nxt
+        return "stop" if self.stop.is_set() else None
 
     def do_read(self, st, label):
         """Read text for a Read step; keep checking until it matches or

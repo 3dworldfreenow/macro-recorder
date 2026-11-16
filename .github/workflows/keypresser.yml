@@ -455,6 +455,58 @@ jobs:
           $bmp.Save("$pwd\kp_step_paste.png")
           $p | Stop-Process
 
+      - name: Test Group step (sub-steps, repeat, go-to inside, next loop)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $x=[int]$pos[0]; $y=[int]$pos[1]
+          $g1 = @(
+            @{type="key"; key="Home"; name="two keys"; times=2; tmin=0.2; tmax=0.2; amin=0; amax=0},
+            @{type="read"; name="check score"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="contains"; pattern="score"; on_yes="Go to step"; yes_step=4; on_no="Stop"; amin=0; amax=0},
+            @{type="key"; key="End"; name="SKIPPED"; amin=0; amax=0},
+            @{type="key"; key="Page Up"; name="after jump"; amin=0.2; amax=0.2}
+          )
+          $g2 = @(
+            @{type="read"; name="go next loop"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="contains"; pattern="score"; on_yes="Next loop"; on_no="Stop"; amin=0; amax=0},
+            @{type="key"; key="End"; name="NEVER"; amin=0; amax=0}
+          )
+          $steps = @(
+            @{type="group"; name="Group one"; steps=$g1; times=2; tmin=0.5; tmax=0.5; amin=0.2; amax=0.2},
+            @{type="group"; name="Group two"; steps=$g2; times=1; amin=0; amax=0},
+            @{type="key"; key="Up Arrow"; name="NEVER"; amin=0; amax=0}
+          )
+          @{loops=2; steps=$steps} | ConvertTo-Json -Depth 8 | Set-Content seq_group.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_group.json --start --no-settings --delay 1 --quit-when-done --log $pwd\group_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+          "--- group log"; Get-Content group_log.txt
+          $order = (Get-Content group_log.txt | ForEach-Object { $q = $_.Split(' '); "$($q[3]):$($q[4])" }) -join ','
+          $one = "1:group,1.1:key,1.1:key,1.2:read,1.4:key,1:group,1.1:key,1.1:key,1.2:read,1.4:key,2:group,2.1:read"
+          $want = "$one,$one"
+          "Order: $order"
+          if ($order -ne $want) { throw "expected $want" }
+          "GROUP TEST PASSED"
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+
+      - name: Screenshot Group step editor
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file $pwd\seq_group.json --open-step-editor 0" -PassThru
+          Start-Sleep 7
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_step_group.png")
+          $p | Stop-Process
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file $pwd\seq_group.json --tab sequence" -PassThru
+          Start-Sleep 6
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_group_list.png")
+          $p | Stop-Process
+
       - name: Screenshot Read step editor
         shell: pwsh
         run: |
@@ -493,6 +545,8 @@ jobs:
             kp_floating.png
             kp_paste_result.png
             kp_step_paste.png
+            kp_step_group.png
+            kp_group_list.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
