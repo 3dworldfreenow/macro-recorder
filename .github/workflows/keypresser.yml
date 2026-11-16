@@ -405,6 +405,56 @@ jobs:
           "SEQUENCE SWITCH TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
 
+      - name: Test Paste text step (OCR pairs, Unicode, typing, stop)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Remove-Item texttest_box.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $x=[int]$pos[0]; $y=[int]$pos[1]; $bx=[int]$pos[4]; $by=[int]$pos[5]
+          "Score at $x,$y  box at $bx,$by"
+          $hindi = [string]::new([char[]](0x0928,0x092E,0x0938,0x094D,0x0924,0x0947))
+          $paste1 = "Hello {read} " + [char]0x2713 + " " + $hindi
+          $steps = @(
+            @{type="paste"; name="answer by OCR"; click_first=$true; cx=$bx; cy=$by; source="ocr"; x=$x; y=$y; aw=300; ah=70; method="ocr"; pmode="contains";
+              pairs=@(@{find="banana"; paste="WRONG"}, @{find="score"; paste=$paste1}); nomatch="stop"; how="paste"; enter=$false; amin=0.3; amax=0.3},
+            @{type="paste"; name="type more"; click_first=$false; source="fixed"; text=" + fixed"; how="type"; enter=$false; amin=0.3; amax=0.3},
+            @{type="paste"; name="no pair -> stop"; click_first=$false; source="ocr"; x=$x; y=$y; aw=300; ah=70; method="auto"; pmode="contains";
+              pairs=@(@{find="zzz"; paste="x"}); nomatch="stop"; how="paste"; amin=0; amax=0},
+            @{type="key"; key="Home"; name="NEVER"; amin=0; amax=0}
+          )
+          @{loops=2; steps=$steps} | ConvertTo-Json -Depth 6 | Set-Content seq_paste.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_paste.json --start --no-settings --delay 1 --quit-when-done --log $pwd\paste_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          $p | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue
+          Start-Sleep 1
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_paste_result.png")
+          "--- paste log"; Get-Content paste_log.txt -Encoding utf8
+          $box = [IO.File]::ReadAllText("$pwd\texttest_box.txt", [Text.Encoding]::UTF8)
+          "Text box now: [$box]"
+          $want = "Hello Score: 42 " + [char]0x2713 + " " + $hindi + " + fixed"
+          $order = (Get-Content paste_log.txt | ForEach-Object { $_.Split(' ')[4] }) -join ','
+          "Order: $order"
+          if ($order -ne "paste,paste,pastenone") { throw "expected paste,paste,pastenone (then stop)" }
+          if ($box -ne $want) { throw "text box should be [$want]" }
+          "PASTE TEST PASSED"
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+
+      - name: Screenshot Paste step editor
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file $pwd\seq_paste.json --open-step-editor 0" -PassThru
+          Start-Sleep 7
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_step_paste.png")
+          $p | Stop-Process
+
       - name: Screenshot Read step editor
         shell: pwsh
         run: |
@@ -441,6 +491,8 @@ jobs:
             kp_read_running.png
             kp_step_read.png
             kp_floating.png
+            kp_paste_result.png
+            kp_step_paste.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false

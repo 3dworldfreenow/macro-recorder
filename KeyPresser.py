@@ -456,6 +456,55 @@ def text_matches(st, text):
     return False
 
 
+def set_clipboard_text(text):
+    """Put Unicode text on the Windows clipboard (works from any thread)."""
+    from ctypes import wintypes as wt
+    u, k = ctypes.windll.user32, ctypes.windll.kernel32
+    u.OpenClipboard.argtypes = [wt.HWND]
+    u.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+    u.SetClipboardData.restype = wt.HANDLE
+    k.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+    k.GlobalAlloc.restype = wt.HGLOBAL
+    k.GlobalLock.argtypes = [wt.HGLOBAL]
+    k.GlobalLock.restype = ctypes.c_void_p
+    k.GlobalUnlock.argtypes = [wt.HGLOBAL]
+    data = text.replace("\r\n", "\n").replace("\n", "\r\n").encode(
+        "utf-16-le") + b"\0\0"
+    for _ in range(20):
+        if u.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("clipboard is busy")
+    try:
+        u.EmptyClipboard()
+        h = k.GlobalAlloc(0x0002, len(data))          # GMEM_MOVEABLE
+        ptr = k.GlobalLock(h)
+        ctypes.memmove(ptr, data, len(data))
+        k.GlobalUnlock(h)
+        u.SetClipboardData(13, h)                      # CF_UNICODETEXT
+    finally:
+        u.CloseClipboard()
+
+
+def pair_matches(mode, find, text):
+    text = text or ""
+    if mode == "equals":
+        return " ".join(text.split()).lower() == " ".join(find.split()).lower()
+    if mode == "regex":
+        try:
+            return re.search(find, text, re.I) is not None
+        except re.error:
+            return False
+    return find.lower() in text.lower() if find else bool(text.strip())
+
+
+def fill_placeholders(paste, read_text):
+    m = NUM_RE.search(read_text or "")
+    return (paste.replace("{read}", (read_text or "").strip())
+            .replace("{number}", m.group().replace(",", "") if m else ""))
+
+
 ACTIONS = ["Continue", "Go to step", "Next loop", "Stop", "Next sequence",
            "Go to sequence"]
 WHEN_DONE = ["Stop", "Next sequence", "Go to sequence"]
@@ -754,8 +803,28 @@ class StepDialog(Dialog):
         self.seq_names = list(seq_names)
         self.type = tk.StringVar(value={"click": "🖱 Click", "key": "⌨ Key",
                                         "link": "🔗 Link", "wait": "⏱ Wait",
-                                        "read": "🔍 Read"}[s.get("type",
-                                                                 "click")])
+                                        "read": "🔍 Read",
+                                        "paste": "📋 Paste"}[s.get("type",
+                                                                  "click")])
+        self.p_click = tk.BooleanVar(value=s.get("click_first", True))
+        self.cx = tk.StringVar(value=str(s.get("cx", 0)))
+        self.cy = tk.StringVar(value=str(s.get("cy", 0)))
+        self.p_source = tk.StringVar(
+            value="Pick by reading screen" if s.get("source") == "ocr"
+            else "Same text every time")
+        self.p_text0 = s.get("text", "")
+        self.p_mode = tk.StringVar(value={"equals": "Equals",
+                                          "regex": "Regex"}.get(
+            s.get("pmode"), "Contains"))
+        self.p_pairs0 = [dict(pr) for pr in s.get("pairs", [])]
+        self.p_nomatch = tk.StringVar(value={"skip": "Skip",
+                                             "stop": "Stop"}.get(
+            s.get("nomatch"), "Paste default"))
+        self.p_default = tk.StringVar(value=s.get("default", ""))
+        self.p_enter = tk.BooleanVar(value=s.get("enter", False))
+        self.p_how = tk.StringVar(value="Type letters"
+                                  if s.get("how") == "type"
+                                  else "Paste (Ctrl+V)")
         self.aw = tk.StringVar(value=fmt(s.get("aw", 300)))
         self.ah = tk.StringVar(value=fmt(s.get("ah", 60)))
         self.method = tk.StringVar(value={"uia": "Windows text",
@@ -807,8 +876,8 @@ class StepDialog(Dialog):
                cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
         Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait",
-                              "🔍 Read"],
-               cols=5, size=12).pack(fill="x", pady=(4, 10))
+                              "🔍 Read", "📋 Paste"],
+               cols=3, size=12).pack(fill="x", pady=(4, 10))
 
         self.area = tk.Frame(b, bg=self.BG)
         self.area.pack(fill="both", expand=True)
@@ -922,6 +991,101 @@ class StepDialog(Dialog):
         self.mmode.trace_add("write", lambda *a: self._show_match())
         self._show_match()
 
+        # --- paste panel
+        pp = self.paste_panel = tk.Frame(self.area, bg=self.BG)
+        self.p_toggle = Toggle(pp, "Click a spot first (e.g. the text box)",
+                               self.p_click)
+        self.p_toggle.pack(fill="x")
+        self.p_click_row = tk.Frame(pp, bg=self.BG)
+        soft_button(self.p_click_row, "📍 Pick spot to click",
+                    lambda: self.pick_into(self.cx, self.cy)
+                    ).pack(side="left")
+        self.label(self.p_click_row, "  X ").pack(side="left")
+        NumField(self.p_click_row, self.cx, step=1, maxv=99999, width=5
+                 ).pack(side="left")
+        self.label(self.p_click_row, " Y ").pack(side="left")
+        NumField(self.p_click_row, self.cy, step=1, maxv=99999, width=5
+                 ).pack(side="left")
+        self.p_click.trace_add("write", lambda *a: self._show_paste())
+
+        self.label(pp, "What to paste:").pack(anchor="w", pady=(8, 0))
+        Choice(pp, self.p_source, ["Same text every time",
+                                   "Pick by reading screen"], cols=2
+               ).pack(fill="x", pady=(2, 6))
+        self.p_source.trace_add("write", lambda *a: self._show_paste())
+
+        self.p_fixed = tk.Frame(pp, bg=self.BG)
+        self.p_textbox = tk.Text(self.p_fixed, height=3, font=(FONT, sz(13)),
+                                 relief="solid", bd=1, wrap="word")
+        self.p_textbox.insert("1.0", self.p_text0)
+        self.p_textbox.pack(fill="x")
+
+        self.p_ocr = tk.Frame(pp, bg=self.BG)
+        big_button(self.p_ocr, "📍  Pick the spot to read",
+                   lambda: self.pick_into(self.x, self.y), size=12,
+                   pady=7).pack(fill="x")
+        r1 = tk.Frame(self.p_ocr, bg=self.BG)
+        r1.pack(anchor="w", pady=4)
+        self.label(r1, "X ").pack(side="left")
+        NumField(r1, self.x, step=1, maxv=99999, width=5).pack(side="left")
+        self.label(r1, "  Y ").pack(side="left")
+        NumField(r1, self.y, step=1, maxv=99999, width=5).pack(side="left")
+        r2 = tk.Frame(self.p_ocr, bg=self.BG)
+        r2.pack(anchor="w", pady=(0, 4))
+        self.label(r2, "Area W ").pack(side="left")
+        NumField(r2, self.aw, step=20, minv=20, maxv=2000, width=4
+                 ).pack(side="left")
+        self.label(r2, "  H ").pack(side="left")
+        NumField(r2, self.ah, step=10, minv=10, maxv=1200, width=4
+                 ).pack(side="left")
+        Choice(self.p_ocr, self.method, ["Auto", "Windows text",
+                                         "OCR (picture)"], cols=3, size=11
+               ).pack(fill="x", pady=(0, 4))
+        self.label(self.p_ocr, "Pairs: if the text …  →  paste:"
+                   ).pack(anchor="w", pady=(4, 0))
+        Choice(self.p_ocr, self.p_mode, ["Contains", "Equals", "Regex"],
+               cols=3, size=11).pack(fill="x", pady=(2, 4))
+        self.pairs_box = tk.Frame(self.p_ocr, bg=self.BG)
+        self.pairs_box.pack(fill="x")
+        self.pair_rows = []
+        for pr in self.p_pairs0 or [{"find": "", "paste": ""}]:
+            self.add_pair(pr.get("find", ""), pr.get("paste", ""))
+        pr_btns = tk.Frame(self.p_ocr, bg=self.BG)
+        pr_btns.pack(fill="x", pady=(4, 0))
+        soft_button(pr_btns, "➕ Add pair", lambda: self.add_pair()
+                    ).pack(side="left")
+        soft_button(pr_btns, "🔍 Test read", self.test_paste_read
+                    ).pack(side="left", padx=6)
+        self.p_test = tk.StringVar(value="")
+        tk.Label(self.p_ocr, textvariable=self.p_test, bg=self.BG,
+                 fg="#0d47a1", font=(FONT, sz(11)), wraplength=sz(440),
+                 justify="left", anchor="w").pack(fill="x", pady=(4, 0))
+        self.label(self.p_ocr, "If nothing matches:").pack(anchor="w",
+                                                          pady=(6, 0))
+        Choice(self.p_ocr, self.p_nomatch, ["Paste default", "Skip", "Stop"],
+               cols=3, size=11).pack(fill="x", pady=(2, 4))
+        self.p_def_row = tk.Frame(self.p_ocr, bg=self.BG)
+        self.label(self.p_def_row, "Default: ").pack(side="left")
+        tk.Entry(self.p_def_row, textvariable=self.p_default,
+                 font=(FONT, sz(13)), relief="solid", bd=1
+                 ).pack(side="left", fill="x", expand=True, ipady=sz(5))
+        self.p_nomatch.trace_add("write", lambda *a: self._show_paste())
+        self.p_tip = self.label(self.p_ocr, "Tip: {read} = the text it read, "
+                                            "{number} = first number in it",
+                                size=10, bold=False, fg="#666")
+        self.p_tip.pack(anchor="w")
+
+        self.p_after = tk.Frame(pp, bg=self.BG)
+        self.p_after.pack(fill="x", pady=(8, 0))
+        Toggle(self.p_after, "Press Enter after pasting", self.p_enter
+               ).pack(fill="x")
+        hr = tk.Frame(self.p_after, bg=self.BG)
+        hr.pack(fill="x", pady=(6, 0))
+        self.label(hr, "How:  ").pack(side="left")
+        Choice(hr, self.p_how, ["Paste (Ctrl+V)", "Type letters"], cols=2,
+               size=11).pack(side="left", fill="x", expand=True)
+        self._show_paste()
+
         # --- then wait (all)
         self.after_panel = self.wait_row(b, self.amin, self.amax,
                                          "Then wait before next step (sec):")
@@ -933,7 +1097,8 @@ class StepDialog(Dialog):
 
     def kind(self):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
-                "⏱ Wait": "wait", "🔍 Read": "read"}[self.type.get()]
+                "⏱ Wait": "wait", "🔍 Read": "read",
+                "📋 Paste": "paste"}[self.type.get()]
 
     def _show_goto(self, var, frame, qframe, after):
         frame.pack_forget()
@@ -990,9 +1155,81 @@ class StepDialog(Dialog):
             self.read_result.set("No text found" + (f" ({err})" if err
                                                      else ""))
 
+    def add_pair(self, find="", paste=""):
+        f = tk.Frame(self.pairs_box, bg=self.BG)
+        f.pack(fill="x", pady=2)
+        fv, pv = tk.StringVar(value=find), tk.StringVar(value=paste)
+        tk.Entry(f, textvariable=fv, font=(FONT, sz(12)), relief="solid",
+                 bd=1, width=12).pack(side="left", fill="x", expand=True,
+                                      ipady=sz(5))
+        self.label(f, " → ").pack(side="left")
+        tk.Entry(f, textvariable=pv, font=(FONT, sz(12)), relief="solid",
+                 bd=1, width=16).pack(side="left", fill="x", expand=True,
+                                      ipady=sz(5))
+        row = (f, fv, pv)
+
+        def remove():
+            f.destroy()
+            if row in self.pair_rows:
+                self.pair_rows.remove(row)
+
+        soft_button(f, "✖", remove, size=11, padx=8, pady=3
+                    ).pack(side="left", padx=(4, 0))
+        self.pair_rows.append(row)
+
+    def _pairs(self):
+        return [{"find": fv.get(), "paste": pv.get()}
+                for _, fv, pv in self.pair_rows
+                if fv.get().strip() or pv.get().strip()]
+
+    def _show_paste(self):
+        if not hasattr(self, "p_after"):
+            return
+        self.p_click_row.pack_forget()
+        self.p_fixed.pack_forget()
+        self.p_ocr.pack_forget()
+        if self.p_click.get():
+            self.p_click_row.pack(fill="x", pady=(4, 0), after=self.p_toggle)
+        if self.p_source.get().startswith("Pick"):
+            self.p_ocr.pack(fill="x", before=self.p_after)
+        else:
+            self.p_fixed.pack(fill="x", before=self.p_after)
+        if self.p_nomatch.get() == "Paste default":
+            self.p_def_row.pack(fill="x", pady=(0, 4), before=self.p_tip)
+        else:
+            self.p_def_row.pack_forget()
+
+    def test_paste_read(self):
+        method = {"Windows text": "uia", "OCR (picture)": "ocr"}.get(
+            self.method.get(), "auto")
+        mode = self.p_mode.get().lower()
+        pairs = self._pairs()
+        wins = (self, self.parent)
+        for w in wins:
+            w.withdraw()
+        self.update()
+        time.sleep(0.35)
+        text, src, err = read_screen_text(
+            method, fnum(self.x.get()), fnum(self.y.get()),
+            fnum(self.aw.get(), 300), fnum(self.ah.get(), 60),
+            want=lambda t: any(pair_matches(mode, p["find"], t)
+                               for p in pairs))
+        for w in wins:
+            w.deiconify()
+        self.lift()
+        if not text:
+            self.p_test.set("No text found" + (f" ({err})" if err else ""))
+            return
+        hit = next((p for p in pairs if pair_matches(mode, p["find"], text)),
+                   None)
+        res = (f"→ would paste \u201c{fill_placeholders(hit['paste'], text)}"
+               f"\u201d" if hit else f"→ no pair matches "
+               f"({self.p_nomatch.get().lower()})")
+        self.p_test.set(f"Read: \u201c{text[:100]}\u201d  {res}")
+
     def show(self):
         for p in (self.click_panel, self.key_panel, self.repeat_panel,
-                  self.link_panel, self.read_panel):
+                  self.link_panel, self.read_panel, self.paste_panel):
             p.pack_forget()
         k = self.kind()
         if k == "click":
@@ -1005,6 +1242,8 @@ class StepDialog(Dialog):
             self.link_panel.pack(fill="x")
         elif k == "read":
             self.read_panel.pack(fill="x")
+        elif k == "paste":
+            self.paste_panel.pack(fill="x")
 
     def ok(self):
         k = self.kind()
@@ -1045,6 +1284,37 @@ class StepDialog(Dialog):
                     messagebox.showerror("Step", f"Regex problem: {e}",
                                          parent=self)
                     return
+        elif k == "paste":
+            ocr = self.p_source.get().startswith("Pick")
+            st.update(click_first=self.p_click.get(),
+                      cx=int(fnum(self.cx.get())), cy=int(fnum(self.cy.get())),
+                      source="ocr" if ocr else "fixed",
+                      text=self.p_textbox.get("1.0", "end-1c"),
+                      x=int(fnum(self.x.get())), y=int(fnum(self.y.get())),
+                      aw=int(fnum(self.aw.get(), 300)),
+                      ah=int(fnum(self.ah.get(), 60)),
+                      method={"Windows text": "uia",
+                              "OCR (picture)": "ocr"}.get(self.method.get(),
+                                                          "auto"),
+                      pmode=self.p_mode.get().lower(), pairs=self._pairs(),
+                      nomatch={"Skip": "skip", "Stop": "stop"}.get(
+                          self.p_nomatch.get(), "default"),
+                      default=self.p_default.get(), enter=self.p_enter.get(),
+                      how="type" if self.p_how.get() == "Type letters"
+                      else "paste")
+            if ocr and not st["pairs"]:
+                messagebox.showerror("Step", "Add at least one pair",
+                                     parent=self)
+                return
+            if ocr and st["pmode"] == "regex":
+                for pr in st["pairs"]:
+                    try:
+                        re.compile(pr["find"])
+                    except re.error as e:
+                        messagebox.showerror("Step", f"Regex problem in "
+                                             f"\u201c{pr['find']}\u201d: {e}",
+                                             parent=self)
+                        return
         elif k == "link":
             url = fix_url(self.url.get())
             if not url:
@@ -1425,6 +1695,18 @@ def describe(st):
         d = f"⌨ {st.get('key')}"
     elif t == "link":
         d = f"🔗 {st.get('url')}"
+    elif t == "paste":
+        if st.get("source") == "ocr":
+            d = (f"📋 Paste by reading ({st.get('x')}, {st.get('y')}): "
+                 f"{len(st.get('pairs', []))} pair(s)")
+        else:
+            txt = st.get("text", "").replace("\n", " ⏎ ")
+            d = f"📋 Paste \u201c{txt[:40]}{'…' if len(txt) > 40 else ''}\u201d"
+        if st.get("click_first"):
+            d += f"  ← click ({st.get('cx')}, {st.get('cy')}) first"
+        if st.get("enter"):
+            d += "  + Enter"
+        return d
     elif t == "read":
         mm = st.get("mmode", "contains")
         rule = (f"{st.get('op', '=')} {fmt(st.get('num', 0))}"
@@ -2195,6 +2477,41 @@ class App:
             time.sleep(0.1)
             self.q.put(("mini_show", None))
 
+    def paste_text(self, text, how="paste"):
+        """Put text where the cursor is: clipboard + Ctrl+V, or typed."""
+        self.gate()
+        if not text:
+            return
+        self.sending = True
+        try:
+            if how == "type":
+                self.kbc.type(text)
+            else:
+                set_clipboard_text(text)
+                time.sleep(0.05)
+                with self.kbc.pressed(Key.ctrl):
+                    self.kbc.press("v")
+                    self.kbc.release("v")
+                time.sleep(0.15)
+        finally:
+            time.sleep(0.02)
+            self.sending = False
+
+    def read_at(self, x, y, aw, ah, method, want=None):
+        """Read screen text, hiding the floating window if it's in the
+        way. Returns (text, source, error)."""
+        r = self.mini_rect
+        covered = r and not (x + aw / 2 < r[0] or x - aw / 2 > r[2] or
+                             y + ah / 2 < r[1] or y - ah / 2 > r[3])
+        if covered:
+            self.q.put(("mini_hide", None))
+            time.sleep(0.3)
+        try:
+            return read_screen_text(method, x, y, aw, ah, want=want)
+        finally:
+            if covered:
+                self.q.put(("mini_show", None))
+
     def press_key(self, name):
         keys = KEYS.get(name, (Key.right,))
         self.gate()
@@ -2418,7 +2735,8 @@ class App:
             c = lv.get("counts", {})
             self.mi_counts.config(
                 text=f"🖱 {c.get('click', 0)}   ⌨ {c.get('key', 0)}   "
-                     f"🔗 {c.get('link', 0)}   🔍 {c.get('read', 0)}")
+                     f"🔗 {c.get('link', 0)}   🔍 {c.get('read', 0)}   "
+                     f"📋 {c.get('paste', 0)}")
             r = lv.get("read")
             if r:
                 src = {"uia": "Windows text", "ocr": "OCR"}.get(r["src"],
@@ -2682,6 +3000,60 @@ class App:
                         n["link"] += 1
                         self.log(f"seq {loop} {i + 1} link {st['url']}")
                         self.q.put(("count", n))
+                    elif t == "paste":
+                        out, why, rtext = None, "", ""
+                        if st.get("source") == "ocr":
+                            self.gate()
+                            mode = st.get("pmode", "contains")
+                            pairs = st.get("pairs", [])
+                            rtext, src, err = self.read_at(
+                                st.get("x", 0), st.get("y", 0),
+                                fnum(st.get("aw", 300)),
+                                fnum(st.get("ah", 60)),
+                                st.get("method", "auto"),
+                                want=lambda tx: any(
+                                    pair_matches(mode, pr["find"], tx)
+                                    for pr in pairs))
+                            hit = next((pr for pr in pairs if pair_matches(
+                                mode, pr["find"], rtext)), None)
+                            n["read"] = n.get("read", 0) + 1
+                            if hit:
+                                out = hit["paste"]
+                                why = f"pair \u201c{hit['find']}\u201d"
+                            elif st.get("nomatch") == "stop":
+                                why = "no pair matched → stop"
+                            elif st.get("nomatch") == "skip":
+                                why = "no pair matched → skip"
+                            else:
+                                out = st.get("default", "")
+                                why = "no pair matched → default"
+                            self.q.put(("read", {
+                                "text": rtext, "src": src, "ok": bool(hit),
+                                "rule": f"{len(pairs)} pair(s), {mode}",
+                                "final": True,
+                                "action": (f"paste \u201c{fill_placeholders(out, rtext)[:30]}\u201d"
+                                           if out is not None else why)}))
+                        else:
+                            out = st.get("text", "")
+                        if out is not None:
+                            out = fill_placeholders(out, rtext)
+                            if st.get("click_first"):
+                                self.do_click(st.get("cx", 0), st.get("cy", 0),
+                                              "Left", True)
+                                time.sleep(0.15)
+                            self.paste_text(out, st.get("how", "paste"))
+                            if st.get("enter"):
+                                self.press_key("Enter")
+                            n["paste"] = n.get("paste", 0) + 1
+                            self.log(f"seq {loop} {i + 1} paste {out!r}")
+                        else:
+                            self.log(f"seq {loop} {i + 1} pastenone "
+                                     f"{st.get('nomatch')}")
+                        self.q.put(("count", n))
+                        if out is None and st.get("nomatch") == "stop":
+                            stop_reason = "Paste step: no pair matched"
+                            self.stop.set()
+                            break
                     elif t == "read":
                         ok, text, src = self.do_read(st, label)
                         n["read"] = n.get("read", 0) + 1
