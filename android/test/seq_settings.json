@@ -1,0 +1,9 @@
+{"name": "Settings test", "loops": 1, "steps": [
+ {"type": "app", "name": "Open Settings", "pkg": "com.android.settings", "app_label": "Settings", "amin": 3, "amax": 3},
+ {"type": "find", "name": "Tap Apps", "keyword": "Apps", "mode": "Contains", "which": "First", "kind": "Tap", "timeout": 6, "on_yes": "Continue", "on_no": "Stop", "amin": 2.5, "amax": 2.5},
+ {"type": "read", "name": "Apps page?", "mode": "Regex", "pattern": "recently opened|see all|default apps|app info|all apps", "timeout": 5, "on_yes": "Continue", "on_no": "Stop", "amin": 0.5, "amax": 0.5},
+ {"type": "nav", "name": "Back", "nav": "Back", "amin": 2, "amax": 2},
+ {"type": "read", "name": "Main settings?", "mode": "Regex", "pattern": "network|connected devices|battery|display", "timeout": 5, "on_yes": "Continue", "on_no": "Stop", "amin": 0.5, "amax": 0.5},
+ {"type": "link", "name": "Open link", "url": "https://example.com", "amin": 3, "amax": 3},
+ {"type": "nav", "name": "Home", "nav": "Home", "amin": 1, "amax": 1}
+]}

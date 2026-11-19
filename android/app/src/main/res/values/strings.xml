@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KeyPresser</string>
+    <string name="svc_desc">Lets KeyPresser tap, swipe, type and read text on screen to run your sequences. It only acts while a sequence is running.</string>
+</resources>
