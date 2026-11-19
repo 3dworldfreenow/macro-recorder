@@ -121,8 +121,16 @@ KEYS = {
     "Alt+Tab (switch app)": (Key.alt, Key.tab),
     "Home": (Key.home,),
     "End": (Key.end,),
+    "Backspace": (Key.backspace,),
+    "Delete": (Key.delete,),
     "N": ("n",),
 }
+# single keys the recorder turns into Key steps
+REC_KEYS = {Key.right: "Right Arrow (next)", Key.left: "Left Arrow (back)",
+            Key.down: "Down Arrow", Key.up: "Up Arrow", Key.enter: "Enter",
+            Key.page_down: "Page Down", Key.page_up: "Page Up",
+            Key.tab: "Tab", Key.f5: "F5 (refresh)", Key.home: "Home",
+            Key.end: "End", Key.delete: "Delete"}
 CLICK_TYPES = ["Left", "Right", "Double"]
 
 FONT = "Segoe UI"
@@ -2701,6 +2709,47 @@ class ProjectsDialog(Dialog):
         self.destroy()
 
 
+class RecordDoneDialog(Dialog):
+    """After recording: add as one group or as separate steps."""
+
+    def __init__(self, parent, steps):
+        super().__init__(parent, "Recording finished")
+        c = sum(s["type"] == "click" for s in steps)
+        k = sum(s["type"] == "key" for s in steps)
+        t = sum(s["type"] == "paste" for s in steps)
+        self.label(self.body, f"Recorded {len(steps)} steps:  🖱 {c} clicks · "
+                              f"⌨ {k} keys · ✍ {t} texts").pack(anchor="w")
+        box = tk.Frame(self.body, bg="white", relief="solid", bd=1)
+        box.pack(fill="x", pady=6)
+        for i, st in enumerate(steps[:8], 1):
+            tk.Label(box, text=f"{i}. {describe(st)}   ·  then "
+                               f"{fmt(st['amin'])}s", bg="white", anchor="w",
+                     font=(FONT, sz(10))).pack(fill="x", padx=6)
+        if len(steps) > 8:
+            tk.Label(box, text=f"… and {len(steps) - 8} more", bg="white",
+                     anchor="w", font=(FONT, sz(10))).pack(fill="x", padx=6)
+        self.how = tk.StringVar(value="As one 🗂 Group step")
+        self.label(self.body, "Add them:").pack(anchor="w", pady=(6, 0))
+        Choice(self.body, self.how, ["As one 🗂 Group step",
+                                     "As separate steps"], cols=2
+               ).pack(fill="x", pady=(2, 6))
+        nr = tk.Frame(self.body, bg=self.BG)
+        nr.pack(fill="x")
+        self.label(nr, "Group name: ").pack(side="left")
+        self.name = tk.StringVar(value=f"Recorded {time.strftime('%H:%M')}")
+        tk.Entry(nr, textvariable=self.name, font=(FONT, sz(13)),
+                 relief="solid", bd=1).pack(side="left", fill="x",
+                                            expand=True, ipady=sz(5))
+        self.footer()
+        self.foot.winfo_children()[0].config(text="✔  Add")
+        self.foot.winfo_children()[1].config(text="Discard")
+
+    def ok(self):
+        self.result = ("group" if self.how.get().startswith("As one")
+                       else "steps", self.name.get().strip() or "Recorded")
+        self.destroy()
+
+
 class KeyChooser(Dialog):
     def __init__(self, parent, current):
         super().__init__(parent, "Choose key")
@@ -2810,6 +2859,8 @@ class App:
             root.after(int(args.pause_at * 1000), self.toggle_pause)
             root.after(int((args.pause_at + args.pause_for) * 1000),
                        self.toggle_pause)
+        if args.record_test:
+            root.after(600, self.start_recording)
         if args.draw_box_test:
             def _box_done(box):
                 self.log(f"box {' '.join(str(int(v)) for v in box)}"
@@ -3077,8 +3128,13 @@ class App:
                                           "center")], height=6)
         fr.pack(fill="both", expand=True, pady=6)
         self.stree.bind("<Double-1>", lambda e: self.edit_step())
-        big_button(sq, "➕  Add step", self.add_step, bg=GREEN, abg=GREEN_A,
-                   size=14, pady=12).pack(fill="x", pady=(0, 4))
+        ar = tk.Frame(sq, bg=self.BG)
+        ar.pack(fill="x", pady=(0, 4))
+        big_button(ar, "➕  Add step", self.add_step, bg=GREEN, abg=GREEN_A,
+                   size=14, pady=12).pack(side="left", fill="x", expand=True)
+        big_button(ar, "⏺  Record", self.start_recording, bg=RED,
+                   abg=RED_A, size=14, pady=12).pack(side="left",
+                                                     padx=(6, 0))
         self._btn_row(sq, [("✏ Edit", self.edit_step),
                            ("🗑 Delete", self.delete_step),
                            ("▲ Up", lambda: self.move_step(-1)),
@@ -3410,6 +3466,277 @@ class App:
             self.switch_seq(len(self.seqs) - 1)
             self.status.set(f"New sequence '{name}' - now add steps")
 
+    # ---------------------------------------------------------- recorder
+    def start_recording(self):
+        if self.running() or getattr(self, "recording", False):
+            return
+        self.recording = True
+        self.rec_events = []
+        self.rec_lock = threading.Lock()
+        self.rec_mods = set()
+        self.rec_ignored = 0
+        self.rec_rect = None
+        self.rec_listeners = []
+        self.rec_keep = tk.BooleanVar(value=True)
+        self.root.withdraw()
+
+        BG = "#3b0d0d"
+        w = self.rec_win = tk.Toplevel(self.root)
+        w.overrideredirect(True)
+        w.attributes("-topmost", True)
+        w.configure(bg=BG)
+        hd = tk.Label(w, text="⠿  ⏺ RECORDING", bg=BG, fg="#ff8a80",
+                      font=(FONT, sz(13), "bold"), anchor="w")
+        hd.pack(fill="x", padx=10, pady=(8, 0))
+        self.rec_count = tk.Label(w, text="Do your clicks and typing now…",
+                                  bg=BG, fg="white", font=(FONT, sz(11)),
+                                  anchor="w", justify="left",
+                                  wraplength=sz(260))
+        self.rec_count.pack(fill="x", padx=10, pady=(2, 6))
+        Toggle(w, "Keep my waits", self.rec_keep).pack(fill="x", padx=8)
+        br = tk.Frame(w, bg=BG)
+        br.pack(fill="x", padx=8, pady=8)
+        big_button(br, "■  STOP", lambda: self.stop_recording(True),
+                   bg=GREEN, abg=GREEN_A, size=14, pady=10
+                   ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        big_button(br, "✖ Cancel", lambda: self.stop_recording(False),
+                   bg=GREY, abg="#bdbdbd", size=12, pady=10
+                   ).pack(side="left")
+        tk.Label(w, text="F8 = stop", bg=BG, fg="#ffab91",
+                 font=(FONT, sz(9))).pack(pady=(0, 6))
+        w.update_idletasks()
+        W = max(sz(290), w.winfo_reqwidth())
+        w.geometry(f"{W}x{w.winfo_reqheight()}"
+                   f"+{self.root.winfo_screenwidth() - W - 16}+16")
+
+        def press(e):
+            w._dx, w._dy = e.x_root - w.winfo_x(), e.y_root - w.winfo_y()
+
+        def drag(e):
+            w.geometry(f"+{e.x_root - w._dx}+{e.y_root - w._dy}")
+
+        for wd in (hd, self.rec_count):
+            wd.bind("<ButtonPress-1>", press)
+            wd.bind("<B1-Motion>", drag)
+        self.root.after(400, self._rec_begin)
+        self.root.after(200, self._rec_tick)
+
+    def _rec_begin(self):
+        if not getattr(self, "recording", False):
+            return
+        self.rec_t0 = time.perf_counter()
+        ml = mouse.Listener(on_click=self._rec_click)
+        kl = keyboard.Listener(on_press=self._rec_press,
+                               on_release=self._rec_release)
+        for l in (ml, kl):
+            l.daemon = True
+            l.start()
+        self.rec_listeners = [ml, kl]
+
+    def _rec_tick(self):
+        if not getattr(self, "recording", False) or not self.rec_win:
+            return
+        try:
+            w = self.rec_win
+            x, y = w.winfo_rootx(), w.winfo_rooty()
+            self.rec_rect = (x - 2, y - 2, x + w.winfo_width() + 2,
+                             y + w.winfo_height() + 2)
+            with self.rec_lock:
+                ev = list(self.rec_events)
+            c = sum(e["k"] == "click" for e in ev)
+            k = sum(e["k"] == "key" for e in ev)
+            ch = sum(e["k"] == "char" for e in ev)
+            self.rec_count.config(
+                text=f"🖱 {c} clicks   ⌨ {k} keys   ✍ {ch} letters"
+                     + (f"\n({self.rec_ignored} unsupported keys skipped)"
+                        if self.rec_ignored else ""))
+        except tk.TclError:
+            return
+        self.root.after(200, self._rec_tick)
+
+    def _rec_add(self, ev):
+        ev["t"] = time.perf_counter()
+        with self.rec_lock:
+            self.rec_events.append(ev)
+
+    def _rec_click(self, x, y, button, pressed):
+        if not pressed or not getattr(self, "recording", False):
+            return
+        r = self.rec_rect
+        if r and r[0] <= x <= r[2] and r[1] <= y <= r[3]:
+            return                         # a tap on the recorder itself
+        self._rec_add({"k": "click", "x": int(x), "y": int(y),
+                       "b": "Right" if button == Button.right else "Left"})
+
+    def _rec_press(self, key):
+        if not getattr(self, "recording", False):
+            return False
+        if key == Key.f8:
+            self.q.put(("rec_stop", None))
+            return
+        if key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):
+            self.rec_mods.add("ctrl")
+            return
+        if key in (Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr):
+            self.rec_mods.add("alt")
+            return
+        if key in (Key.shift, Key.shift_l, Key.shift_r, Key.caps_lock,
+                   Key.cmd, Key.cmd_l, Key.cmd_r):
+            return
+        vk = getattr(key, "vk", None)
+        ch = getattr(key, "char", None)
+        if "ctrl" in self.rec_mods:
+            if key == Key.tab:
+                self._rec_add({"k": "key", "name": "Ctrl+Tab (next tab)"})
+            elif vk == 0x57 or (ch and ch.lower() in ("w", "\x17")):
+                self._rec_add({"k": "key", "name": "Ctrl+W (close tab)"})
+            else:
+                self.rec_ignored += 1
+            return
+        if "alt" in self.rec_mods:
+            if key == Key.tab:
+                self._rec_add({"k": "key", "name": "Alt+Tab (switch app)"})
+            else:
+                self.rec_ignored += 1
+            return
+        if key == Key.space:
+            self._rec_add({"k": "char", "c": " "})
+        elif key == Key.backspace:
+            self._rec_add({"k": "bs"})
+        elif key in REC_KEYS:
+            self._rec_add({"k": "key", "name": REC_KEYS[key]})
+        elif ch and ch.isprintable():
+            self._rec_add({"k": "char", "c": ch})
+        else:
+            self.rec_ignored += 1
+
+    def _rec_release(self, key):
+        if key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):
+            self.rec_mods.discard("ctrl")
+        elif key in (Key.alt, Key.alt_l, Key.alt_r, Key.alt_gr):
+            self.rec_mods.discard("alt")
+
+    def _rec_build(self, events, keep):
+        """Turn recorded events into steps."""
+        raw = []                     # each: {"t0", "t1", "step"}
+        for e in events:
+            last = raw[-1] if raw else None
+            t = e["t"]
+            if e["k"] == "click":
+                ls = last["step"] if last else None
+                if (ls and ls["type"] == "click" and e["b"] == "Left"
+                        and ls["button"] == "Left" and t - last["t1"] <= 0.45
+                        and abs(ls["x"] - e["x"]) <= 6
+                        and abs(ls["y"] - e["y"]) <= 6
+                        and not last.get("dbl")):
+                    ls["button"] = "Double"
+                    last["dbl"] = True
+                    last["t1"] = t
+                    continue
+                raw.append({"t0": t, "t1": t, "step": {
+                    "type": "click", "x": e["x"], "y": e["y"],
+                    "button": e["b"], "times": 1, "tmin": 0.5, "tmax": 1}})
+            elif e["k"] == "char":
+                if (last and last["step"]["type"] == "paste"
+                        and not last["step"].get("enter")
+                        and t - last["t1"] <= 2.0):
+                    last["step"]["text"] += e["c"]
+                    last["t1"] = t
+                else:
+                    raw.append({"t0": t, "t1": t, "step": {
+                        "type": "paste", "source": "fixed", "text": e["c"],
+                        "click_first": False, "how": "type",
+                        "enter": False, "name": "typed text"}})
+            elif e["k"] == "bs":
+                if (last and last["step"]["type"] == "paste"
+                        and last["step"]["text"]
+                        and not last["step"].get("enter")):
+                    last["step"]["text"] = last["step"]["text"][:-1]
+                    last["t1"] = t
+                    if not last["step"]["text"]:
+                        raw.pop()
+                else:
+                    raw.append({"t0": t, "t1": t, "step": {
+                        "type": "key", "key": "Backspace", "times": 1,
+                        "tmin": 0.5, "tmax": 1}})
+            elif e["k"] == "key":
+                if (e["name"] == "Enter" and last
+                        and last["step"]["type"] == "paste"
+                        and not last["step"].get("enter")
+                        and t - last["t1"] <= 2.0):
+                    last["step"]["enter"] = True
+                    last["t1"] = t
+                    continue
+                raw.append({"t0": t, "t1": t, "step": {
+                    "type": "key", "key": e["name"], "times": 1,
+                    "tmin": 0.5, "tmax": 1}})
+        steps = []
+        for i, r in enumerate(raw):
+            st = r["step"]
+            st.setdefault("name", "")
+            st["run"] = "every"
+            if i + 1 < len(raw):
+                gap = max(0.0, raw[i + 1]["t0"] - r["t1"])
+                gap = round(gap, 1) if keep else 0.3
+            else:
+                gap = 0.0
+            st["amin"] = st["amax"] = gap
+            steps.append(st)
+        return steps
+
+    def stop_recording(self, keep_result=True):
+        if not getattr(self, "recording", False):
+            return
+        self.recording = False
+        for l in self.rec_listeners:
+            try:
+                l.stop()
+            except Exception:
+                pass
+        with self.rec_lock:
+            events = list(self.rec_events)
+        keep = bool(self.rec_keep.get())
+        try:
+            self.rec_win.destroy()
+        except Exception:
+            pass
+        self.rec_win = None
+        self.rec_rect = None
+        self.root.deiconify()
+        if not keep_result:
+            self.status.set("Recording cancelled")
+            return
+        steps = self._rec_build(events, keep)
+        if self.args.record_out:
+            with open(self.args.record_out, "w", encoding="utf-8") as f:
+                json.dump({"loops": 1, "steps": steps}, f, indent=1,
+                          ensure_ascii=False)
+            self.root.after(200, self.close)
+            return
+        if not steps:
+            self.status.set("Nothing was recorded")
+            return
+        r = RecordDoneDialog(self.root, steps).run()
+        if not r:
+            self.status.set("Recording discarded")
+            return
+        how, name = r
+        i = self._sel(self.stree)
+        pos = len(self.steps) if i is None else i + 1
+        if how == "group":
+            self.steps.insert(pos, {"type": "group", "name": name,
+                                    "run": "every", "steps": steps,
+                                    "times": 1, "tmin": 0.5, "tmax": 1,
+                                    "amin": 0, "amax": 1})
+            sel = pos
+        else:
+            for k, st in enumerate(steps):
+                self.steps.insert(pos + k, st)
+            sel = pos + len(steps) - 1
+        self._refresh_steps(select=sel)
+        self._save_settings()
+        self.status.set(f"Added {len(steps)} recorded steps")
+
     def add_step(self):
         if self.running():
             return
@@ -3652,6 +3979,8 @@ class App:
 
     # ---------------------------------------------------------- hotkeys
     def _on_key(self, key):
+        if getattr(self, "recording", False):
+            return                       # the recorder handles keys itself
         if key == Key.f8:
             self.q.put(("toggle", None))
         elif key == Key.f9:
@@ -4500,6 +4829,8 @@ class App:
                         self.live["counts"] = dict(val)
                     self.count_var.set(self._counts_text())
                     self._refresh_mini()
+                elif msg == "rec_stop":
+                    self.stop_recording(True)
                 elif msg == "seqswitch":
                     if 0 <= val < len(self.seqs) and val != self.cur:
                         self.switch_seq(val, save=False)
@@ -4565,6 +4896,8 @@ def main():
     p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--show-keyboard", action="store_true")
     p.add_argument("--draw-box-test", action="store_true")
+    p.add_argument("--record-test", action="store_true")
+    p.add_argument("--record-out", default="")
     p.add_argument("--pause-at", type=float, default=0)
     p.add_argument("--pause-for", type=float, default=0)
     p.add_argument("--ui-size", choices=list(SIZES), default=None)

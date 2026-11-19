@@ -633,6 +633,68 @@ jobs:
           if ($r -notmatch " box 300 300 500 420$") { throw "expected box 300 300 500 420" }
           "DRAW BOX TEST PASSED"
 
+      - name: Test Record (record real actions, then replay them)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public class M4 {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);
+            [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, int f, int e);
+            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+          }
+          "@
+          [M4]::SetProcessDPIAware() | Out-Null
+          function Click($x, $y) { [M4]::SetCursorPos($x, $y) | Out-Null; Start-Sleep -Milliseconds 80; [M4]::mouse_event(2,0,0,0,0); Start-Sleep -Milliseconds 40; [M4]::mouse_event(4,0,0,0,0) }
+          Remove-Item texttest_box.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $lx=[int]$pos[0]; $ly=[int]$pos[1]; $bx=[int]$pos[4]; $by=[int]$pos[5]
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --record-test --record-out $pwd\rec.json" -PassThru
+          Start-Sleep 6
+          Click $bx $by
+          Start-Sleep -Milliseconds 800
+          [System.Windows.Forms.SendKeys]::SendWait("hi there")
+          Start-Sleep -Milliseconds 150
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+          Start-Sleep -Milliseconds 1000
+          [System.Windows.Forms.SendKeys]::SendWait("{RIGHT}")
+          Start-Sleep -Milliseconds 700
+          Click $lx $ly; Start-Sleep -Milliseconds 120; Click $lx $ly
+          Start-Sleep -Milliseconds 600
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_recording.png")
+          [M4]::keybd_event(0x77, 0, 0, 0); Start-Sleep -Milliseconds 50; [M4]::keybd_event(0x77, 0, 2, 0)
+          $p | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+          "--- recorded"; Get-Content rec.json
+          $r = Get-Content rec.json -Raw | ConvertFrom-Json
+          $types = ($r.steps | ForEach-Object { $_.type }) -join ','
+          "Types: $types"
+          if ($types -ne "click,paste,key,click") { throw "expected click,paste,key,click" }
+          if ($r.steps[1].text -ne "hi there" -or -not $r.steps[1].enter) { throw "typed text wrong" }
+          if ($r.steps[2].key -ne "Right Arrow (next)") { throw "key wrong" }
+          if ($r.steps[3].button -ne "Double") { throw "double-click not detected" }
+          if ([math]::Abs($r.steps[0].x - $bx) -gt 2 -or [math]::Abs($r.steps[0].y - $by) -gt 2) { throw "click position wrong" }
+          $w0 = [double]$r.steps[0].amin; $w1 = [double]$r.steps[1].amin
+          "Waits: $w0 after click, $w1 after text"
+          if ($w0 -lt 0.6 -or $w0 -gt 1.4) { throw "wait after click should be ~0.8s" }
+          if ($w1 -lt 0.8 -or $w1 -gt 1.6) { throw "wait after text should be ~1.0s" }
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+          Start-Sleep 1
+          Remove-Item texttest_box.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--mode sequence --seq-file $pwd\rec.json --start --no-settings --delay 1 --quit-when-done" -PassThru | Wait-Process -Timeout 60
+          $box = [IO.File]::ReadAllText("$pwd\texttest_box.txt")
+          "Replayed text box: [$box]"
+          if ($box -ne "hi there") { throw "replay should type hi there" }
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+          "RECORD TEST PASSED"
+
       - name: Screenshot Find step editor and test-find boxes
         shell: pwsh
         run: |
@@ -688,6 +750,7 @@ jobs:
             kp_projects.png
             kp_step_find.png
             kp_draw_box.png
+            kp_recording.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
