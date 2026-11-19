@@ -514,7 +514,7 @@ def fill_placeholders(paste, read_text):
 
 
 ACTIONS = ["Continue", "Go to step", "Next loop", "Stop", "Next sequence",
-           "Go to sequence"]
+           "Go to sequence", "Run sequence & return"]
 WHEN_DONE = ["Stop", "Next sequence", "Go to sequence"]
 
 
@@ -534,6 +534,9 @@ def action_text(st, ok):
         return f"go to step {st.get('yes_step' if ok else 'no_step', 1)}"
     if a == "Go to sequence":
         return f"go to \u201c{st.get('yes_seq' if ok else 'no_seq', '?')}\u201d"
+    if a == "Run sequence & return":
+        return (f"run \u201c{st.get('yes_seq' if ok else 'no_seq', '?')}"
+                f"\u201d & come back")
     return a.lower()
 
 
@@ -1165,7 +1168,7 @@ class StepDialog(Dialog):
         qframe.pack_forget()
         if var.get() == "Go to step":
             frame.pack(after=after, anchor="w", pady=(4, 0))
-        elif var.get() == "Go to sequence":
+        elif var.get() in ("Go to sequence", "Run sequence & return"):
             qframe.pack(after=after, fill="x", pady=(4, 0))
 
     def _show_match(self):
@@ -3108,6 +3111,40 @@ class App:
                     return k
         return None
 
+    def call_seq(self, j, ctx):
+        """Run sequence j (its own repeat count, forever = once), then come
+        back. Returns None to continue, or 'stop' / ('seq', i)."""
+        depth = ctx.get("depth", 0)
+        if depth >= 10:
+            return self._halt(ctx, "too many sequences calling each other")
+        saved = {k: ctx[k] for k in ("cur", "sname", "loop", "total")}
+        sq = ctx["seqs"][j]
+        loops = max(0, int(fnum(sq.get("loops", 1))))
+        loops = loops or 1
+        ctx.update(cur=j, sname=sq["name"], depth=depth + 1)
+        self.log(f"seq 0 0 call {sq['name']}")
+        if not ctx["test"]:
+            self.q.put(("seqswitch", j))
+        sig = None
+        for lp in range(1, loops + 1):
+            if self.stop.is_set():
+                break
+            ctx["loop"], ctx["total"] = lp, loops
+            sig = self.exec_steps(sq["steps"], ctx, "")
+            if sig == "nextloop":
+                sig = None
+                continue
+            if sig:
+                break
+        ctx.update(saved)
+        ctx["depth"] = depth
+        if sig or self.stop.is_set():
+            return sig or "stop"
+        self.log(f"seq 0 0 return {saved['sname']}")
+        if not ctx["test"]:
+            self.q.put(("seqswitch", saved["cur"]))
+        return None
+
     def _halt(self, ctx, reason):
         ctx["stop_reason"] = reason
         self.stop.set()
@@ -3259,6 +3296,15 @@ class App:
                             ctx, "no next sequence" if act == "Next sequence"
                             else "sequence not found")
                     sig = ("seq", j)
+                elif act == "Run sequence & return":
+                    j = self._target_seq(ctx["seqs"], "goto",
+                                         st.get("yes_seq" if ok else "no_seq"),
+                                         ctx["cur"])
+                    if j is None:
+                        return self._halt(ctx, "sequence not found")
+                    sub = self.call_seq(j, ctx)
+                    if sub:                      # stop or a sequence switch
+                        return sub
             if self.stop.is_set():
                 return "stop"
             gap = random.uniform(st.get("amin", 0), st.get("amax", 0))

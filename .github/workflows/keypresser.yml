@@ -490,6 +490,31 @@ jobs:
           "GROUP TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
 
+      - name: Test Run sequence & return
+        shell: pwsh
+        run: |
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $x=[int]$pos[0]; $y=[int]$pos[1]
+          $seqs = @(
+            @{name="Main"; loops="2"; then="stop"; steps=@(
+              @{type="key"; key="Home"; amin=0.2; amax=0.2},
+              @{type="read"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="contains"; pattern="score"; on_yes="Run sequence & return"; yes_seq="Helper"; on_no="Stop"; amin=0; amax=0},
+              @{type="key"; key="End"; amin=0.2; amax=0.2})},
+            @{name="Helper"; loops="0"; then="stop"; steps=@(@{type="key"; key="Page Down"; times=2; tmin=0.2; tmax=0.2; amin=0.2; amax=0.2})}
+          )
+          @{seqs=$seqs} | ConvertTo-Json -Depth 6 | Set-Content seq_call.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_call.json --seq Main --start --no-settings --delay 1 --quit-when-done --log $pwd\call_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue
+          "--- call log"; Get-Content call_log.txt
+          $order = (Get-Content call_log.txt | ForEach-Object { $q = $_.Split(' '); "$($q[3]):$($q[4])" }) -join ','
+          $one = "1:key,2:read,0:call,1:key,1:key,0:return,3:key"
+          "Order: $order"
+          if ($order -ne "$one,$one") { throw "expected $one,$one" }
+          "RUN AND RETURN TEST PASSED"
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+
       - name: Screenshot Group step editor
         shell: pwsh
         run: |
