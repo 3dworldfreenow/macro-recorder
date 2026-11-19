@@ -122,7 +122,7 @@ object Overlay {
                 statusView?.text = summary
                 cdView?.text = ""
                 pauseBtn?.visibility = View.GONE
-                box.postDelayed({ hidePanel(app) }, 3500)
+                box.postDelayed({ if (panel === box) hidePanel(app) else remove(box) }, 3500)
                 MainActivity.lastResult = summary
             }
         }
