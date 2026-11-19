@@ -319,8 +319,18 @@ class MainActivity : Activity() {
         }
         val r = Runner(applicationContext, seq, delay, log)
         runner = r
-        if (Overlay.canDraw(this)) Overlay.showPanel(this, r)
-        else toast("Tip: allow the floating window to see progress and Stop")
+        if (Overlay.canDraw(this)) {
+            try {
+                Overlay.showPanel(this, r)
+                log?.appendText("0 panel shown\n")
+            } catch (e: Exception) {
+                log?.appendText("0 panel error ${e.javaClass.simpleName} ${e.message}\n")
+                toast("Could not show the floating window: ${e.message}")
+            }
+        } else {
+            log?.appendText("0 panel no-permission\n")
+            toast("Tip: allow the floating window to see progress and Stop")
+        }
         moveTaskToBack(true)
         r.start()
     }
