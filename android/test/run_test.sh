@@ -29,7 +29,7 @@ sleep 2
 adb shell am start -n $PKG/.MainActivity --es kp_run_b64 "$IMP" --ez kp_log true --ei kp_delay 1
 sleep 5
 adb exec-out screencap -p > $OUT/3_running.png
-adb shell dumpsys window windows | grep -iE "Window #|keypresser" | grep -i -B1 keypresser | head -20
+adb shell dumpsys window windows | awk '/Window #/{p=0} /Window #.*u0 com.keypresser.touch}/{p=1} p' | head -60
 adb shell run-as $PKG cat files/run_log.txt | head -3
 sleep 4
 adb exec-out screencap -p > $OUT/4_running_apps.png
