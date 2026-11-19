@@ -112,6 +112,7 @@ jobs:
           "@
           [M]::SetProcessDPIAware() | Out-Null
           Remove-Item dist\KeyPresser\keypresser_settings.json -ErrorAction SilentlyContinue
+          Remove-Item dist\KeyPresser\projects -Recurse -ErrorAction SilentlyContinue
           $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--open-picker --quit-after-pick" -PassThru
           Start-Sleep 7
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -123,12 +124,13 @@ jobs:
           [M]::mouse_event(2, 0, 0, 0, 0); Start-Sleep -Milliseconds 60; [M]::mouse_event(4, 0, 0, 0, 0)
           $p | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
           Get-Process KeyPresser -ErrorAction SilentlyContinue | Stop-Process
-          $j = Get-Content dist\KeyPresser\keypresser_settings.json -Raw | ConvertFrom-Json
+          $j = Get-Content "dist\KeyPresser\projects\My project.json" -Raw | ConvertFrom-Json
           $pt = $j.points[0]
           "Saved point: X $($pt.x)  Y $($pt.y)  every $($pt.min)-$($pt.max)s"
           if ($j.points.Count -ne 1 -or $pt.x -ne 333 -or $pt.y -ne 444) { throw "picked point wrong" }
           "PICK TEST PASSED"
           Remove-Item dist\KeyPresser\keypresser_settings.json
+          Remove-Item dist\KeyPresser\projects -Recurse
 
       - name: Test sequence (click x3 -> key x2 -> wait, 2 loops)
         shell: pwsh
