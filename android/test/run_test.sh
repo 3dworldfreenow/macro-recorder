@@ -40,6 +40,21 @@ done
 adb shell run-as $PKG cat files/run_log.txt | tee run_log.txt
 adb exec-out screencap -p > $OUT/5_after.png
 
+# floating panel during a wait (over Settings and on the home screen)
+cat > /tmp/seq_wait.json <<'J'
+{"loops": 1, "steps": [
+ {"type": "app", "pkg": "com.android.settings", "app_label": "Settings", "amin": 6, "amax": 6},
+ {"type": "nav", "nav": "Home", "amin": 6, "amax": 6}
+]}
+J
+W=$(base64 -w0 /tmp/seq_wait.json)
+adb shell am start -n $PKG/.MainActivity --es kp_run_b64 "$W" --ez kp_log true --ei kp_delay 1
+sleep 5
+adb exec-out screencap -p > $OUT/6_panel_over_settings.png
+sleep 6
+adb exec-out screencap -p > $OUT/7_panel_home.png
+sleep 4
+
 set +x
 fail=0
 check() { if grep -qE "$1" run_log.txt; then echo "OK   $2"; else echo "FAIL $2"; fail=1; fi; }

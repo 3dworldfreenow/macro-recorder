@@ -164,6 +164,7 @@ class MainActivity : Activity() {
         accBtn.text = if (acc) "✔ Accessibility ON" else "✖ Turn on Accessibility"
         accBtn.background = Ui.round(if (acc) Ui.GREEN else Ui.RED, Ui.dp(this, 10).toFloat())
         ovBtn.text = if (ov) "✔ Floating window ON" else "✖ Allow floating window"
+        ovBtn.visibility = if (KPService.inst != null && !Overlay.canDraw(this)) View.GONE else View.VISIBLE
         ovBtn.background = Ui.round(if (ov) Ui.GREEN else Ui.RED, Ui.dp(this, 10).toFloat())
         permHint.text = if (acc) "" else
             "Tip: if Android says “Restricted setting”, tap here → ⋮ (top right) → " +

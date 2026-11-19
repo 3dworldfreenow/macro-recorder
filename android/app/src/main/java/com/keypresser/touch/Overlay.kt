@@ -18,15 +18,36 @@ import android.widget.TextView
 /** Floating windows drawn over other apps. */
 object Overlay {
 
+    /** We can show floating windows if Accessibility is on (best: shown even
+     *  over Settings) or the "display over other apps" permission is given. */
     fun canDraw(ctx: Context): Boolean =
-        Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(ctx)
+        KPService.inst != null || Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(ctx)
 
+    /** Context + window type to use: the accessibility service if it is on. */
     @Suppress("DEPRECATION")
-    private fun type(): Int =
-        if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else WindowManager.LayoutParams.TYPE_PHONE
+    private fun host(ctx: Context): Pair<Context, Int> {
+        val svc = KPService.inst
+        if (svc != null) return svc to WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+        return ctx.applicationContext to
+            (if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else WindowManager.LayoutParams.TYPE_PHONE)
+    }
 
     private fun wm(ctx: Context) = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+    // each window remembers the WindowManager it was added with
+    private val owners = HashMap<View, WindowManager>()
+
+    private fun add(wmgr: WindowManager, v: View, lp: WindowManager.LayoutParams) {
+        wmgr.addView(v, lp)
+        owners[v] = wmgr
+    }
+
+    private fun remove(v: View?) {
+        if (v == null) return
+        try { owners[v]?.removeView(v) } catch (_: Exception) {}
+        owners.remove(v)
+    }
 
     // ================================================================ run panel
     private var panel: View? = null
@@ -37,7 +58,8 @@ object Overlay {
     @SuppressLint("ClickableViewAccessibility")
     fun showPanel(ctx: Context, runner: Runner) {
         hidePanel(ctx)
-        val app = ctx.applicationContext
+        val (app, wtype) = host(ctx)
+        val wmgr = wm(app)
         val box = Ui.col(app)
         box.background = Ui.round(0xEE1F2A30.toInt(), Ui.dp(app, 14).toFloat())
         val p = Ui.dp(app, 10)
@@ -68,7 +90,7 @@ object Overlay {
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            type(),
+            wtype,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
@@ -85,12 +107,12 @@ object Overlay {
                 MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = lp.x; sy = lp.y }
                 MotionEvent.ACTION_MOVE -> {
                     lp.x = sx + (e.rawX - dx).toInt(); lp.y = sy + (e.rawY - dy).toInt()
-                    try { wm(app).updateViewLayout(box, lp) } catch (_: Exception) {}
+                    try { wmgr.updateViewLayout(box, lp) } catch (_: Exception) {}
                 }
             }
             true
         }
-        wm(app).addView(box, lp)
+        add(wmgr, box, lp)
         panel = box; statusView = st; cdView = cd; pauseBtn = pb
 
         runner.listener = object : Runner.Listener {
@@ -112,9 +134,8 @@ object Overlay {
         b.background = Ui.round(if (paused) Ui.GREEN else Ui.ORANGE, Ui.dp(b.context, 10).toFloat())
     }
 
-    fun hidePanel(ctx: Context) {
-        val v = panel ?: return
-        try { wm(ctx.applicationContext).removeView(v) } catch (_: Exception) {}
+    fun hidePanel(@Suppress("UNUSED_PARAMETER") ctx: Context) {
+        remove(panel)
         panel = null; statusView = null; cdView = null; pauseBtn = null
     }
 
@@ -128,8 +149,8 @@ object Overlay {
      */
     @SuppressLint("ClickableViewAccessibility")
     fun pick(ctx: Context, prompt: String, done: (Int, Int) -> Unit, cancel: () -> Unit) {
-        val app = ctx.applicationContext
-        hidePick(app)
+        hidePick(ctx)
+        val (app, wtype) = host(ctx)
         val bar = Ui.col(app)
         bar.background = Ui.round(0xF01E3A5F.toInt(), Ui.dp(app, 14).toFloat())
         val p = Ui.dp(app, 12)
@@ -138,21 +159,21 @@ object Overlay {
         bar.addView(Ui.label(app, "Open the screen you want, then tap 📍 PICK and tap the spot.",
             13f, false, 0xFFCFE0F5.toInt()))
         val r = Ui.row(app)
-        r.addView(Ui.weight(Ui.button(app, "📍 PICK", Ui.GREEN) { showCatcher(app, done, cancel) }))
+        r.addView(Ui.weight(Ui.button(app, "📍 PICK", Ui.GREEN) { showCatcher(app, wtype, done) }))
         r.addView(Ui.weight(Ui.button(app, "Cancel", Ui.GREY) { hidePick(app); cancel() }))
         bar.addView(r)
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            type(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            wtype, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.BOTTOM
         lp.y = Ui.dp(app, 40)
-        wm(app).addView(bar, lp)
+        add(wm(app), bar, lp)
         pickBar = bar
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    private fun showCatcher(app: Context, done: (Int, Int) -> Unit, cancel: () -> Unit) {
+    private fun showCatcher(app: Context, wtype: Int, done: (Int, Int) -> Unit) {
         pickBar?.visibility = View.GONE
         val layer = FrameLayout(app)
         layer.setBackgroundColor(0x55000000)
@@ -173,7 +194,7 @@ object Overlay {
         }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-            type(),
+            wtype,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -183,14 +204,13 @@ object Overlay {
         if (Build.VERSION.SDK_INT >= 28) {
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
-        wm(app).addView(layer, lp)
+        add(wm(app), layer, lp)
         pickCatcher = layer
     }
 
-    fun hidePick(ctx: Context) {
-        val app = ctx.applicationContext
-        pickBar?.let { try { wm(app).removeView(it) } catch (_: Exception) {} }
-        pickCatcher?.let { try { wm(app).removeView(it) } catch (_: Exception) {} }
+    fun hidePick(@Suppress("UNUSED_PARAMETER") ctx: Context) {
+        remove(pickBar)
+        remove(pickCatcher)
         pickBar = null; pickCatcher = null
     }
 }
