@@ -61,7 +61,10 @@ object Overlay {
         }
         r.addView(Ui.weight(pb))
         r.addView(Ui.weight(sb))
-        box.addView(r, LinearLayout.LayoutParams(Ui.dp(app, 260), LinearLayout.LayoutParams.WRAP_CONTENT))
+        val dm = app.resources.displayMetrics
+        val panelW = minOf(Ui.dp(app, 260), dm.widthPixels - Ui.dp(app, 40))
+        st.maxWidth = panelW
+        box.addView(r, LinearLayout.LayoutParams(panelW, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -71,8 +74,8 @@ object Overlay {
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.START
-        val dm = app.resources.displayMetrics
-        lp.x = dm.widthPixels - Ui.dp(app, 290)
+        // keep it inside the screen on any phone size (top-right corner)
+        lp.x = maxOf(0, dm.widthPixels - panelW - Ui.dp(app, 36))
         lp.y = Ui.dp(app, 80)
 
         // drag the panel by its title

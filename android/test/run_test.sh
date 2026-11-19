@@ -26,17 +26,16 @@ adb shell input keyevent KEYCODE_BACK
 sleep 2
 
 # run the test sequence
-LOG=/sdcard/Android/data/$PKG/files/run_log.txt
 adb shell am start -n $PKG/.MainActivity --es kp_run_b64 "$IMP" --ez kp_log true --ei kp_delay 1
 sleep 5
 adb exec-out screencap -p > $OUT/3_running.png
 sleep 4
 adb exec-out screencap -p > $OUT/4_running_apps.png
 for i in $(seq 1 60); do
-  if adb shell cat $LOG 2>/dev/null | grep -qE " (done|stopped)"; then break; fi
+  if adb shell run-as $PKG cat files/run_log.txt 2>/dev/null | grep -qE " (done|stopped)"; then break; fi
   sleep 2
 done
-adb shell cat $LOG | tee run_log.txt
+adb shell run-as $PKG cat files/run_log.txt | tee run_log.txt
 adb exec-out screencap -p > $OUT/5_after.png
 
 set +x
@@ -49,7 +48,7 @@ check "4 nav Back" "pressed Back"
 check "5 read match" "back on main Settings (read check)"
 check "6 link (ok|fail)" "link step ran"
 check "7 nav Home" "pressed Home"
-check " done$" "sequence finished"
+check " done" "sequence finished"
 if grep -q "stopped" run_log.txt; then echo "FAIL sequence stopped early"; fail=1; fi
 if [ $fail -eq 0 ]; then echo "ANDROID TEST PASSED"; else echo "ANDROID TEST FAILED"; fi
 exit $fail

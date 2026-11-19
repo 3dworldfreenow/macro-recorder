@@ -343,7 +343,7 @@ class MainActivity : Activity() {
         i.removeExtra("kp_run_b64")
         val seq = JSONObject(String(Base64.decode(b64, Base64.DEFAULT)))
         val log = if (i.getBooleanExtra("kp_log", false))
-            File(getExternalFilesDir(null), "run_log.txt") else null
+            File(filesDir, "run_log.txt") else null
         log?.delete()
         runSeq(seq, i.getIntExtra("kp_delay", 1), log)
     }
