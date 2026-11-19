@@ -474,6 +474,304 @@ def read_screen_text(method, x, y, w, h, want=None):
 NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
 
+# ---------------------------------------------------------------------
+# finding a word / button on screen (for the Find & click step)
+# ---------------------------------------------------------------------
+def virtual_screen():
+    try:
+        gm = ctypes.windll.user32.GetSystemMetrics
+        w, h = gm(78), gm(79)
+        if w > 0 and h > 0:
+            return gm(76), gm(77), w, h
+    except Exception:
+        pass
+    return 0, 0, 1920, 1080
+
+
+def run_com(fn, timeout=25):
+    """Run fn() in its own COM-ready thread; returns its result."""
+    out = {}
+
+    def work():
+        try:
+            import comtypes
+            comtypes.CoInitializeEx(0)
+        except Exception:
+            pass
+        try:
+            out["r"] = fn()
+        except Exception as e:
+            out["e"] = e
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(timeout)
+    if "e" in out:
+        raise out["e"]
+    if "r" not in out:
+        raise TimeoutError("took too long")
+    return out["r"]
+
+
+def _norm(t):
+    return " ".join((t or "").split()).lower()
+
+
+def find_spans(mode, kw, text):
+    """Where kw occurs in text, as (start, end) pairs."""
+    text = text or ""
+    if mode == "regex":
+        try:
+            return [(m.start(), m.end()) for m in re.finditer(kw, text, re.I)
+                    if m.end() > m.start()]
+        except re.error:
+            return []
+    if mode == "equals":
+        return [(0, len(text))] if _norm(text) == _norm(kw) and kw else []
+    if not kw:
+        return []
+    return [(m.start(), m.end())
+            for m in re.finditer(re.escape(kw), text, re.I)]
+
+
+def _ocr_words(x0, y0, w, h):
+    """OCR an area. Returns [(line_text, [(word, (l, t, r, b)), ...])] in
+    screen coordinates."""
+    import asyncio
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.graphics.imaging import (SoftwareBitmap,
+                                                BitmapPixelFormat,
+                                                BitmapAlphaMode)
+    from winrt.windows.storage.streams import DataWriter
+    eng = OcrEngine.try_create_from_user_profile_languages()
+    if eng is None:
+        raise RuntimeError("Windows OCR is not available")
+    big = max(w, h)
+    scale = 2.0 if big * 2 <= 2500 else min(1.0, 2500.0 / big)
+    data, W, H = _grab_bgra(x0, y0, w, h, scale)
+    dw = DataWriter()
+    dw.write_bytes(data)
+    sb = SoftwareBitmap.create_copy_from_buffer(
+        dw.detach_buffer(), BitmapPixelFormat.BGRA8, W, H,
+        BitmapAlphaMode.IGNORE)
+
+    async def run():
+        return await eng.recognize_async(sb)
+
+    res = asyncio.run(run())
+    sx, sy = W / float(w), H / float(h)
+    lines = []
+    for ln in res.lines:
+        words = []
+        for wd in ln.words:
+            r = wd.bounding_rect
+            l, t = x0 + r.x / sx, y0 + r.y / sy
+            words.append((wd.text, (l, t, l + r.width / sx,
+                                    t + r.height / sy)))
+        lines.append((" ".join(wt for wt, _ in words), words))
+    return lines
+
+
+def _ocr_matches(lines, mode, kw):
+    out, seen = [], set()
+
+    def add(text, rects):
+        l = min(r[0] for r in rects)
+        t = min(r[1] for r in rects)
+        r_ = max(r[2] for r in rects)
+        b = max(r[3] for r in rects)
+        key = (round(l), round(t), round(r_), round(b))
+        if key not in seen:
+            seen.add(key)
+            out.append({"text": text, "rect": (l, t, r_, b), "src": "ocr"})
+
+    for text, words in lines:
+        offs, pos = [], 0
+        for wt, rect in words:
+            offs.append((pos, pos + len(wt), rect, wt))
+            pos += len(wt) + 1
+        if mode == "equals":
+            for a, b, rect, wt in offs:
+                if _norm(wt) == _norm(kw):
+                    add(wt, [rect])
+        for s0, e0 in find_spans(mode, kw, text):
+            rs = [rect for a, b, rect, wt in offs if a < e0 and b > s0]
+            if rs:
+                add(text[s0:e0], rs)
+    return out
+
+
+def _uia_find(x0, y0, w, h, whole, want):
+    """Buttons / texts whose name matches, using Windows UI Automation."""
+    import comtypes.client
+    try:
+        from comtypes.gen import UIAutomationClient as UIA
+    except ImportError:
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen import UIAutomationClient as UIA
+    uia = comtypes.client.CreateObject(UIA.CUIAutomation,
+                                       interface=UIA.IUIAutomation)
+    if whole:
+        top = uia.ElementFromHandle(ctypes.windll.user32.GetForegroundWindow())
+    else:
+        top = uia.ElementFromPoint(UIA.tagPOINT(int(x0 + w / 2),
+                                                int(y0 + h / 2)))
+        root = uia.GetRootElement()
+        walker = uia.ControlViewWalker
+        for _ in range(80):
+            par = walker.GetParentElement(top)
+            if not par or uia.CompareElements(par, root):
+                break
+            top = par
+    cr = uia.CreateCacheRequest()
+    cr.AddProperty(30005)                         # Name
+    cr.AddProperty(30001)                         # BoundingRectangle
+    cond = uia.CreatePropertyCondition(30022, False)   # not off-screen
+    arr = top.FindAllBuildCache(4, cond, cr)      # 4 = all descendants
+    out = []
+    for i in range(arr.Length if arr else 0):
+        e = arr.GetElement(i)
+        try:
+            name = e.CachedName
+            if not name or not want(name):
+                continue
+            r = e.CachedBoundingRectangle
+            l, t, r_, b = r.left, r.top, r.right, r.bottom
+        except Exception:
+            continue
+        if r_ - l <= 0 or b - t <= 0:
+            continue
+        cx, cy = (l + r_) / 2, (t + b) / 2
+        if x0 <= cx <= x0 + w and y0 <= cy <= y0 + h:
+            out.append({"text": name.strip(), "rect": (l, t, r_, b),
+                        "src": "uia"})
+    return out
+
+
+def find_area(st):
+    if st.get("whole", True):
+        return virtual_screen()
+    aw, ah = fnum(st.get("aw", 300)), fnum(st.get("ah", 60))
+    return (int(st.get("x", 0) - aw / 2), int(st.get("y", 0) - ah / 2),
+            int(aw), int(ah))
+
+
+def _find_raw(method, mode, kw, area, whole):
+    x0, y0, w, h = area
+    order = {"uia": ["uia"], "ocr": ["ocr"]}.get(method, ["uia", "ocr"])
+    errs = []
+    for m in order:
+        try:
+            if m == "uia":
+                found = _uia_find(x0, y0, w, h, whole,
+                                  lambda nm: bool(find_spans(mode, kw, nm)))
+            else:
+                found = _ocr_matches(_ocr_words(x0, y0, w, h), mode, kw)
+        except Exception as e:
+            errs.append(f"{m}: {e}")
+            continue
+        if found:
+            return found, m, ""
+    return [], "", "; ".join(errs)
+
+
+def choose_target(matches, st, anchors=()):
+    """Sort matches top-to-bottom, left-to-right and pick one."""
+    ms = sorted(matches, key=lambda m: (round(m["rect"][1] / 12),
+                                        m["rect"][0]))
+    if not ms:
+        return None, ms
+
+    def ctr(m):
+        l, t, r, b = m["rect"]
+        return (l + r) / 2, (t + b) / 2
+
+    which = st.get("which", "first")
+    if which == "last":
+        return ms[-1], ms
+    if which == "number":
+        k = int(fnum(st.get("n", 1), 1))
+        return (ms[k - 1] if 1 <= k <= len(ms) else None), ms
+    if which == "nearest":
+        nx, ny = fnum(st.get("nx", 0)), fnum(st.get("ny", 0))
+        return min(ms, key=lambda m: (ctr(m)[0] - nx) ** 2 +
+                   (ctr(m)[1] - ny) ** 2), ms
+    if which == "next to word":
+        if not anchors:
+            return None, ms
+
+        def dist(m):
+            cx, cy = ctr(m)
+            return min(abs(cy - ctr(a)[1]) * 3 + abs(cx - ctr(a)[0])
+                       for a in anchors)
+        return min(ms, key=dist), ms
+    return ms[0], ms
+
+
+def find_targets(st):
+    """Search the screen for the step's keyword.
+    Returns (target or None, all matches in order, source, error)."""
+    area = find_area(st)
+    whole = st.get("whole", True)
+    mode, kw = st.get("fmode", "contains"), st.get("keyword", "")
+    method = st.get("method", "auto")
+
+    def work():
+        ms, src, err = _find_raw(method, mode, kw, area, whole)
+        anchors = []
+        if ms and st.get("which") == "next to word" and st.get("near"):
+            anchors, _, _ = _find_raw(method, "contains", st["near"], area,
+                                      whole)
+        return ms, src, err, anchors
+
+    try:
+        ms, src, err, anchors = run_com(work)
+    except Exception as e:
+        return None, [], "", str(e)
+    target, ordered = choose_target(ms, st, anchors)
+    return target, ordered, src, err
+
+
+def find_rule_text(st):
+    w = st.get("which", "first")
+    if w == "number":
+        w = f"#{int(fnum(st.get('n', 1), 1))}"
+    elif w == "next to word":
+        w = f"next to \u201c{st.get('near', '')}\u201d"
+    return (f"find {st.get('fmode', 'contains')} \u201c{st.get('keyword', '')}"
+            f"\u201d · {w}" + ("" if st.get("whole", True) else " · in area"))
+
+
+def show_find_overlay(root, matches, target, secs=4.0):
+    """Draw numbered boxes on every match (target in green) for a while."""
+    x0, y0, w, h = virtual_screen()
+    key = "#ff00fe"
+    ov = tk.Toplevel(root)
+    ov.overrideredirect(True)
+    ov.attributes("-topmost", True)
+    try:
+        ov.attributes("-transparentcolor", key)
+    except Exception:
+        pass
+    ov.geometry(f"{w}x{h}+{x0}+{y0}")
+    c = tk.Canvas(ov, bg=key, highlightthickness=0)
+    c.pack(fill="both", expand=True)
+    for k, m in enumerate(matches, 1):
+        l, t, r, b = m["rect"]
+        hit = m is target
+        col = "#00c853" if hit else "#ff1744"
+        c.create_rectangle(l - x0 - 3, t - y0 - 3, r - x0 + 3, b - y0 + 3,
+                           outline=col, width=4 if hit else 3)
+        c.create_rectangle(l - x0 - 3, t - y0 - 26, l - x0 + (110 if hit
+                                                              else 30),
+                           t - y0 - 3, fill=col, outline=col)
+        c.create_text(l - x0 + 2, t - y0 - 15, anchor="w", fill="white",
+                      font=(FONT, 11, "bold"),
+                      text=f"{k}  ✔ click" if hit else str(k))
+    ov.after(int(secs * 1000), ov.destroy)
+    return ov
+
+
 def text_matches(st, text):
     """Does text satisfy the step's rule?"""
     mode = st.get("mmode", "contains")
@@ -875,8 +1173,26 @@ class StepDialog(Dialog):
                                         "link": "🔗 Link", "wait": "⏱ Wait",
                                         "read": "🔍 Read",
                                         "paste": "📋 Paste",
-                                        "group": "🗂 Group"}[s.get("type",
-                                                                  "click")])
+                                        "group": "🗂 Group",
+                                        "find": "🎯 Find"}[s.get("type",
+                                                                "click")])
+        self.f_kw = tk.StringVar(value=s.get("keyword", ""))
+        self.f_mode = tk.StringVar(value={"equals": "Equals",
+                                          "regex": "Regex"}.get(
+            s.get("fmode"), "Contains"))
+        self.f_whole = tk.BooleanVar(value=s.get("whole", True))
+        self.f_which = tk.StringVar(value={
+            "last": "Last", "number": "Number", "nearest": "Nearest to spot",
+            "next to word": "Next to word"}.get(s.get("which"), "First"))
+        self.f_n = tk.StringVar(value=str(s.get("n", 1)))
+        self.nx = tk.StringVar(value=str(s.get("nx", 0)))
+        self.ny = tk.StringVar(value=str(s.get("ny", 0)))
+        self.f_near = tk.StringVar(value=s.get("near", ""))
+        self.f_dx = tk.StringVar(value=str(s.get("dx", 0)))
+        self.f_dy = tk.StringVar(value=str(s.get("dy", 0)))
+        self.f_test = tk.StringVar(value="")
+        self.yes_title = tk.StringVar(value="✔ If it matches:")
+        self.no_title = tk.StringVar(value="✖ If not:")
         self.g_steps = json.loads(json.dumps(s.get("steps", [])))
         self.p_click = tk.BooleanVar(value=s.get("click_first", True))
         self.cx = tk.StringVar(value=str(s.get("cx", 0)))
@@ -948,7 +1264,7 @@ class StepDialog(Dialog):
                cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
         Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait",
-                              "🔍 Read", "📋 Paste", "🗂 Group"],
+                              "🔍 Read", "📋 Paste", "🗂 Group", "🎯 Find"],
                cols=4, size=11).pack(fill="x", pady=(4, 10))
 
         self.area = tk.Frame(b, bg=self.BG)
@@ -1033,7 +1349,7 @@ class StepDialog(Dialog):
         NumField(self.num_row, self.num, step=1, minv=-1e12, maxv=1e12,
                  width=8).pack(side="left", padx=(8, 0))
         self.hint = self.label(rd, "", size=10, bold=False, fg="#666")
-        self.after_match = tk.Frame(rd, bg=self.BG)
+        self.after_match = tk.Frame(self.area, bg=self.BG)
         tm = tk.Frame(self.after_match, bg=self.BG)
         tm.pack(anchor="w", pady=(6, 0))
         self.label(tm, "Keep checking for up to ").pack(side="left")
@@ -1041,10 +1357,11 @@ class StepDialog(Dialog):
                  ).pack(side="left")
         self.label(tm, " sec").pack(side="left")
         for title, var, stepv, seqv in (
-                ("✔ If it matches:", self.on_yes, self.yes_step,
-                 self.yes_seq),
-                ("✖ If not:", self.on_no, self.no_step, self.no_seq)):
-            self.label(self.after_match, title).pack(anchor="w", pady=(8, 0))
+                (self.yes_title, self.on_yes, self.yes_step, self.yes_seq),
+                (self.no_title, self.on_no, self.no_step, self.no_seq)):
+            tl = self.label(self.after_match, "")
+            tl.config(textvariable=title)
+            tl.pack(anchor="w", pady=(8, 0))
             row = tk.Frame(self.after_match, bg=self.BG)
             row.pack(fill="x")
             Choice(row, var, ACTIONS, cols=3, size=11).pack(fill="x")
@@ -1059,9 +1376,94 @@ class StepDialog(Dialog):
             var.trace_add("write", lambda *a, v=var, f=sr, q=qr, r=row:
                           self._show_goto(v, f, q, r))
             self._show_goto(var, sr, qr, row)
-        self.after_match.pack(fill="x")
         self.mmode.trace_add("write", lambda *a: self._show_match())
         self._show_match()
+
+        # --- find & click panel
+        fp = self.find_panel = tk.Frame(self.area, bg=self.BG)
+        self.label(fp, "Find this word / button:").pack(anchor="w")
+        kr = tk.Frame(fp, bg=self.BG)
+        kr.pack(fill="x", pady=(2, 4))
+        ke = tk.Entry(kr, textvariable=self.f_kw, font=(FONT, sz(14)),
+                      relief="solid", bd=1)
+        ke.pack(side="left", fill="x", expand=True, ipady=sz(6))
+        soft_button(kr, "⌨", lambda: (ke.focus_set(), open_touch_keyboard()),
+                    size=13, padx=12, pady=4).pack(side="left", padx=(6, 0))
+        Choice(fp, self.f_mode, ["Contains", "Equals", "Regex"], cols=3,
+               size=11).pack(fill="x", pady=(0, 2))
+        self.label(fp, "Tip: Equals is best for short button words like "
+                       "\u201cBack\u201d.", size=10, bold=False,
+                   fg="#666").pack(anchor="w")
+        Toggle(fp, "Search the whole screen", self.f_whole
+               ).pack(fill="x", pady=(8, 0))
+        self.f_area = tk.Frame(fp, bg=self.BG)
+        soft_button(self.f_area, "📍 Pick centre of search box",
+                    lambda: self.pick_into(self.x, self.y)).pack(anchor="w")
+        ar2 = tk.Frame(self.f_area, bg=self.BG)
+        ar2.pack(anchor="w", pady=(4, 0))
+        self.label(ar2, "X ").pack(side="left")
+        NumField(ar2, self.x, step=1, maxv=99999, width=5).pack(side="left")
+        self.label(ar2, " Y ").pack(side="left")
+        NumField(ar2, self.y, step=1, maxv=99999, width=5).pack(side="left")
+        ar3 = tk.Frame(self.f_area, bg=self.BG)
+        ar3.pack(anchor="w", pady=(4, 0))
+        self.label(ar3, "Box W ").pack(side="left")
+        NumField(ar3, self.aw, step=50, minv=20, maxv=8000, width=5
+                 ).pack(side="left")
+        self.label(ar3, " H ").pack(side="left")
+        NumField(ar3, self.ah, step=50, minv=10, maxv=5000, width=5
+                 ).pack(side="left")
+        self.f_whole.trace_add("write", lambda *a: self._show_find())
+        self.f_after_area = tk.Frame(fp, bg=self.BG)
+        self.f_after_area.pack(fill="x")
+        fa = self.f_after_area
+        self.label(fa, "Read with:").pack(anchor="w", pady=(6, 0))
+        Choice(fa, self.method, ["Auto", "Windows text", "OCR (picture)"],
+               cols=3, size=11).pack(fill="x", pady=(2, 4))
+        self.label(fa, "If it finds more than one, click:").pack(anchor="w")
+        Choice(fa, self.f_which, ["First", "Last", "Number",
+                                  "Nearest to spot", "Next to word"],
+               cols=3, size=11).pack(fill="x", pady=(2, 2))
+        self.f_num_row = tk.Frame(fa, bg=self.BG)
+        self.label(self.f_num_row, "   number (from top, left to right): ",
+                   bold=False).pack(side="left")
+        NumField(self.f_num_row, self.f_n, step=1, minv=1, maxv=99, width=3
+                 ).pack(side="left")
+        self.f_near_row = tk.Frame(fa, bg=self.BG)
+        soft_button(self.f_near_row, "📍 Pick the spot",
+                    lambda: self.pick_into(self.nx, self.ny)).pack(side="left")
+        self.label(self.f_near_row, "  X ").pack(side="left")
+        NumField(self.f_near_row, self.nx, step=1, maxv=99999, width=5
+                 ).pack(side="left")
+        self.label(self.f_near_row, " Y ").pack(side="left")
+        NumField(self.f_near_row, self.ny, step=1, maxv=99999, width=5
+                 ).pack(side="left")
+        self.f_word_row = tk.Frame(fa, bg=self.BG)
+        self.label(self.f_word_row, "   next to: ").pack(side="left")
+        tk.Entry(self.f_word_row, textvariable=self.f_near,
+                 font=(FONT, sz(13)), relief="solid", bd=1
+                 ).pack(side="left", fill="x", expand=True, ipady=sz(5))
+        self.f_which.trace_add("write", lambda *a: self._show_find())
+        self.f_click_lbl = self.label(fa, "Click:")
+        self.f_click_lbl.pack(anchor="w", pady=(8, 0))
+        Choice(fa, self.btn, CLICK_TYPES, cols=3, size=11
+               ).pack(fill="x", pady=(2, 2))
+        off = tk.Frame(fa, bg=self.BG)
+        off.pack(anchor="w", pady=(2, 0))
+        self.label(off, "Offset  X ").pack(side="left")
+        NumField(off, self.f_dx, step=10, minv=-2000, maxv=2000, width=4
+                 ).pack(side="left")
+        self.label(off, "  Y ").pack(side="left")
+        NumField(off, self.f_dy, step=10, minv=-2000, maxv=2000, width=4
+                 ).pack(side="left")
+        tf = tk.Frame(fa, bg=self.BG)
+        tf.pack(fill="x", pady=(8, 0))
+        soft_button(tf, "🔍 Test find (shows boxes)", self.test_find
+                    ).pack(side="left")
+        tk.Label(fa, textvariable=self.f_test, bg=self.BG, fg="#0d47a1",
+                 font=(FONT, sz(11)), wraplength=sz(440), justify="left",
+                 anchor="w").pack(fill="x", pady=(4, 0))
+        self._show_find()
 
         # --- group panel (sub-steps)
         gp = self.group_panel = tk.Frame(self.area, bg=self.BG)
@@ -1208,7 +1610,8 @@ class StepDialog(Dialog):
     def kind(self):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
                 "⏱ Wait": "wait", "🔍 Read": "read",
-                "📋 Paste": "paste", "🗂 Group": "group"}[self.type.get()]
+                "📋 Paste": "paste", "🗂 Group": "group",
+                "🎯 Find": "find"}[self.type.get()]
 
     def _show_goto(self, var, frame, qframe, after):
         frame.pack_forget()
@@ -1217,6 +1620,80 @@ class StepDialog(Dialog):
             frame.pack(after=after, anchor="w", pady=(4, 0))
         elif var.get() in ("Go to sequence", "Run sequence & return"):
             qframe.pack(after=after, fill="x", pady=(4, 0))
+
+    def _show_find(self):
+        if not hasattr(self, "f_after_area"):
+            return
+        if self.f_whole.get():
+            self.f_area.pack_forget()
+        else:
+            self.f_area.pack(fill="x", pady=(4, 0), before=self.f_after_area)
+        for r in (self.f_num_row, self.f_near_row, self.f_word_row):
+            r.pack_forget()
+        w = self.f_which.get()
+        row = {"Number": self.f_num_row, "Nearest to spot": self.f_near_row,
+               "Next to word": self.f_word_row}.get(w)
+        if row:
+            row.pack(fill="x", pady=(2, 0), before=self.f_click_lbl)
+
+    def _find_step(self):
+        return {"keyword": self.f_kw.get().strip(),
+                "fmode": self.f_mode.get().lower(),
+                "whole": self.f_whole.get(),
+                "x": int(fnum(self.x.get())), "y": int(fnum(self.y.get())),
+                "aw": int(fnum(self.aw.get(), 300)),
+                "ah": int(fnum(self.ah.get(), 60)),
+                "method": {"Windows text": "uia",
+                           "OCR (picture)": "ocr"}.get(self.method.get(),
+                                                       "auto"),
+                "which": {"Last": "last", "Number": "number",
+                          "Nearest to spot": "nearest",
+                          "Next to word": "next to word"}.get(
+                    self.f_which.get(), "first"),
+                "n": max(1, int(fnum(self.f_n.get(), 1))),
+                "nx": int(fnum(self.nx.get())), "ny": int(fnum(self.ny.get())),
+                "near": self.f_near.get().strip(),
+                "button": self.btn.get(),
+                "dx": int(fnum(self.f_dx.get())),
+                "dy": int(fnum(self.f_dy.get()))}
+
+    def test_find(self):
+        fs = self._find_step()
+        if not fs["keyword"]:
+            self.f_test.set("Type a word first")
+            return
+        wins = self.chain()
+        for w in wins:
+            w.withdraw()
+        self.update()
+        time.sleep(0.35)
+        target, ms, src, err = find_targets(fs)
+
+        def back():
+            for w in reversed(wins):
+                w.deiconify()
+            self.lift()
+
+        if ms:
+            show_find_overlay(self.parent if not isinstance(self.parent,
+                                                            Dialog)
+                              else wins[-1], ms, target, 3.5)
+            self.after(3600, back)
+        else:
+            back()
+        src = {"uia": "Windows text", "ocr": "OCR"}.get(src, src)
+        if not ms:
+            self.f_test.set("Not found" + (f" ({err[:120]})" if err else ""))
+        elif target is None:
+            self.f_test.set(f"Found {len(ms)} [{src}], but none fits your "
+                            f"choice (e.g. number too big / word not found)")
+        else:
+            k = ms.index(target) + 1
+            l, t, r, b = target["rect"]
+            self.f_test.set(
+                f"Found {len(ms)} [{src}] → will click #{k} "
+                f"\u201c{target['text'][:40]}\u201d at "
+                f"({int((l + r) / 2) + fs['dx']}, {int((t + b) / 2) + fs['dy']})")
 
     def _show_match(self):
         self.pat_row.pack_forget()
@@ -1229,7 +1706,7 @@ class StepDialog(Dialog):
                           "done|finished",
                  "Number": "Uses the first number found in the text."}
         self.hint.config(text=hints.get(m, ""))
-        self.hint.pack(anchor="w", before=self.after_match)
+        self.hint.pack(anchor="w")
         if m == "Number":
             self.num_row.pack(anchor="w", pady=(2, 0), before=self.hint)
         else:
@@ -1395,7 +1872,7 @@ class StepDialog(Dialog):
     def show(self):
         for p in (self.click_panel, self.key_panel, self.repeat_panel,
                   self.link_panel, self.read_panel, self.paste_panel,
-                  self.group_panel):
+                  self.group_panel, self.find_panel, self.after_match):
             p.pack_forget()
         k = self.kind()
         if k == "click":
@@ -1408,6 +1885,14 @@ class StepDialog(Dialog):
             self.link_panel.pack(fill="x")
         elif k == "read":
             self.read_panel.pack(fill="x")
+            self.yes_title.set("✔ If it matches:")
+            self.no_title.set("✖ If not:")
+            self.after_match.pack(fill="x")
+        elif k == "find":
+            self.find_panel.pack(fill="x")
+            self.yes_title.set("✔ If found (after clicking it):")
+            self.no_title.set("✖ If not found:")
+            self.after_match.pack(fill="x")
         elif k == "paste":
             self.paste_panel.pack(fill="x")
         elif k == "group":
@@ -1455,6 +1940,25 @@ class StepDialog(Dialog):
             if st["mmode"] == "regex":
                 try:
                     re.compile(st["pattern"])
+                except re.error as e:
+                    messagebox.showerror("Step", f"Regex problem: {e}",
+                                         parent=self)
+                    return
+        elif k == "find":
+            st.update(self._find_step())
+            st.update(timeout=max(0, fnum(self.timeout.get())),
+                      on_yes=self.on_yes.get(),
+                      yes_step=max(1, int(fnum(self.yes_step.get(), 1))),
+                      on_no=self.on_no.get(),
+                      no_step=max(1, int(fnum(self.no_step.get(), 1))),
+                      yes_seq=self.yes_seq.get(), no_seq=self.no_seq.get())
+            if not st["keyword"]:
+                messagebox.showerror("Step", "Type the word to find",
+                                     parent=self)
+                return
+            if st["fmode"] == "regex":
+                try:
+                    re.compile(st["keyword"])
                 except re.error as e:
                     messagebox.showerror("Step", f"Regex problem: {e}",
                                          parent=self)
@@ -2043,6 +2547,9 @@ def describe(st):
         d = f"⌨ {st.get('key')}"
     elif t == "link":
         d = f"🔗 {st.get('url')}"
+    elif t == "find":
+        return (f"🎯 Find & click: {find_rule_text(st)} → "
+                f"✔ {action_text(st, True)} / ✖ {action_text(st, False)}")
     elif t == "group":
         subs = st.get("steps", [])
         names = ", ".join(q.get("name") or describe(q)[:2].strip()
@@ -3569,37 +4076,39 @@ class App:
                     "action": action_text(st, ok)}))
                 self.log(f"seq {loop} {sid} read "
                          f"{'match' if ok else 'nomatch'} {text!r}")
-                act = st.get("on_yes" if ok else "on_no", "Continue")
                 short = (text[:40] + "…") if len(text) > 40 else text
                 self.q.put(("status", f"{label} · read \u201c{short}\u201d → "
                                       f"{'✔' if ok else '✖'} "
                                       f"{action_text(st, ok)}"))
-                if act == "Stop":
-                    return self._halt(ctx, "stopped by Read step")
-                if act == "Next loop":
-                    sig = "nextloop"
-                elif act == "Go to step":
-                    tgt = int(st.get("yes_step" if ok else "no_step", 1))
-                    nxt = min(max(1, tgt), len(steps)) - 1
-                elif act in ("Next sequence", "Go to sequence"):
-                    j = self._target_seq(
-                        ctx["seqs"],
-                        "next" if act == "Next sequence" else "goto",
-                        st.get("yes_seq" if ok else "no_seq"), ctx["cur"])
-                    if j is None:
-                        return self._halt(
-                            ctx, "no next sequence" if act == "Next sequence"
-                            else "sequence not found")
-                    sig = ("seq", j)
-                elif act == "Run sequence & return":
-                    j = self._target_seq(ctx["seqs"], "goto",
-                                         st.get("yes_seq" if ok else "no_seq"),
-                                         ctx["cur"])
-                    if j is None:
-                        return self._halt(ctx, "sequence not found")
-                    sub = self.call_seq(j, ctx)
-                    if sub:                      # stop or a sequence switch
-                        return sub
+                ret, sig, nxt = self._branch(st, ok, ctx, steps, nxt, "Read")
+                if ret:
+                    return ret
+            elif t == "find":
+                target, ms, src = self.do_find(st, label)
+                ok = target is not None
+                n["read"] += 1
+                if ok:
+                    l_, t_, r_, b_ = target["rect"]
+                    cx = int((l_ + r_) / 2) + int(fnum(st.get("dx", 0)))
+                    cy = int((t_ + b_) / 2) + int(fnum(st.get("dy", 0)))
+                    self.do_click(cx, cy, st.get("button", "Left"), True)
+                    n["click"] += 1
+                    self.log(f"seq {loop} {sid} find found {cx} {cy} "
+                             f"{target['text']!r}")
+                else:
+                    self.log(f"seq {loop} {sid} find notfound {len(ms)}")
+                self.q.put(("count", n))
+                self.q.put(("read", {
+                    "text": (f"{len(ms)} found · clicked #{ms.index(target) + 1}"
+                             f" \u201c{target['text'][:40]}\u201d" if ok else
+                             f"not found ({len(ms)} matches)"),
+                    "src": src, "ok": ok, "rule": find_rule_text(st),
+                    "final": True, "action": action_text(st, ok)}))
+                self.q.put(("status", f"{label} · {'✔ clicked' if ok else '✖ not found'}"
+                                      f" → {action_text(st, ok)}"))
+                ret, sig, nxt = self._branch(st, ok, ctx, steps, nxt, "Find")
+                if ret:
+                    return ret
             if self.stop.is_set():
                 return "stop"
             gap = random.uniform(st.get("amin", 0), st.get("amax", 0))
@@ -3610,6 +4119,76 @@ class App:
                 return sig
             i = nxt
         return "stop" if self.stop.is_set() else None
+
+    def _branch(self, st, ok, ctx, steps, nxt, who):
+        """Apply a Read / Find result. Returns (ret, sig, nxt): if ret is
+        set, the step list must return it right away."""
+        act = st.get("on_yes" if ok else "on_no", "Continue")
+        sel_seq = st.get("yes_seq" if ok else "no_seq")
+        if act == "Stop":
+            return self._halt(ctx, f"stopped by {who} step"), None, nxt
+        if act == "Next loop":
+            return None, "nextloop", nxt
+        if act == "Go to step":
+            tgt = int(st.get("yes_step" if ok else "no_step", 1))
+            return None, None, min(max(1, tgt), len(steps)) - 1
+        if act in ("Next sequence", "Go to sequence"):
+            j = self._target_seq(ctx["seqs"],
+                                 "next" if act == "Next sequence" else "goto",
+                                 sel_seq, ctx["cur"])
+            if j is None:
+                return self._halt(ctx, "no next sequence"
+                                  if act == "Next sequence"
+                                  else "sequence not found"), None, nxt
+            return None, ("seq", j), nxt
+        if act == "Run sequence & return":
+            j = self._target_seq(ctx["seqs"], "goto", sel_seq, ctx["cur"])
+            if j is None:
+                return self._halt(ctx, "sequence not found"), None, nxt
+            sub = self.call_seq(j, ctx)
+            if sub:
+                return sub, None, nxt
+        return None, None, nxt
+
+    def find_now(self, st):
+        """find_targets, hiding the floating window while searching."""
+        x0, y0, w, h = find_area(st)
+        r = self.mini_rect
+        covered = r and (st.get("whole", True) or not (
+            x0 + w < r[0] or x0 > r[2] or y0 + h < r[1] or y0 > r[3]))
+        if covered:
+            self.q.put(("mini_hide", None))
+            time.sleep(0.3)
+        try:
+            return find_targets(st)
+        finally:
+            if covered:
+                self.q.put(("mini_show", None))
+
+    def do_find(self, st, label):
+        """Search until found or the time limit passes."""
+        limit = fnum(st.get("timeout", 0))
+        end = self.vnow() + limit
+        target, ms, src = None, [], ""
+        if limit > 0:
+            self.q.put(("cd", (end, limit, f"looking for "
+                                           f"\u201c{st.get('keyword', '')}"
+                                           f"\u201d")))
+        while not self.stop.is_set():
+            self.gate()
+            target, ms, src, err = self.find_now(st)
+            if err and not ms:
+                self.q.put(("status", f"{label} · find: {err[:80]}"))
+            self.q.put(("read", {
+                "text": f"{len(ms)} found", "src": src,
+                "ok": target is not None, "rule": find_rule_text(st),
+                "final": False, "action": ""}))
+            if target is not None or self.vnow() >= end:
+                break
+            self.wait(min(0.7, max(0.0, end - self.vnow())))
+        if limit > 0:
+            self.q.put(("cd", None))
+        return target, ms, src
 
     def do_read(self, st, label):
         """Read text for a Read step; keep checking until it matches or

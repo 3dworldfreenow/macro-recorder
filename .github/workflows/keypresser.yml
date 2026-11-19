@@ -568,6 +568,54 @@ jobs:
           $bmp.Save("$pwd\kp_group_list.png")
           $p | Stop-Process
 
+      - name: Test Find & click (Windows text + OCR, which one, not found)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Remove-Item findtest_clicks.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\findtest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          (New-Object -ComObject WScript.Shell).AppActivate("FindTest") | Out-Null
+          $c = (Get-Content findtest_pos.txt).Split(' '); $cx=[int]$c[0]; $cy=[int]$c[1]
+          function F($kw, $method, $which, $extra) {
+            $h = @{type="find"; keyword=$kw; fmode="equals"; whole=$false; x=$cx; y=$cy; aw=480; ah=320; method=$method; which=$which; button="Left"; dx=0; dy=0; on_yes="Continue"; on_no="Stop"; amin=0.6; amax=0.6}
+            foreach ($k in $extra.Keys) { $h[$k] = $extra[$k] }
+            return $h
+          }
+          $steps = @(
+            (F "Back" "uia" "first" @{whole=$true}),
+            (F "Accept" "ocr" "next to word" @{near="John"}),
+            (F "Accept" "auto" "number" @{n=1}),
+            (F "Accept" "uia" "last" @{}),
+            (F "Banana" "auto" "first" @{timeout=2; on_no="Go to step"; no_step=7}),
+            @{type="key"; key="Home"; name="SKIPPED"; amin=0; amax=0},
+            (F "Accept" "uia" "next to word" @{near="Mary"})
+          )
+          @{loops=1; steps=$steps} | ConvertTo-Json -Depth 6 | Set-Content seq_find.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_find.json --start --no-settings --delay 1 --quit-when-done --log $pwd\find_log.txt"
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru
+          $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+          "--- find log"; Get-Content find_log.txt
+          $clicks = (Get-Content findtest_clicks.txt) -join ','
+          "Clicked: $clicks"
+          $order = (Get-Content find_log.txt | ForEach-Object { $q = $_.Split(' '); "$($q[3]):$($q[5])" }) -join ','
+          "Order: $order"
+          if ($clicks -ne "Back,JohnAccept,MaryAccept,JohnAccept,MaryAccept") { throw "wrong buttons clicked" }
+          if ($order -ne "1:found,2:found,3:found,4:found,5:notfound,7:found") { throw "wrong step order" }
+          "FIND TEST PASSED"
+
+      - name: Screenshot Find step editor and test-find boxes
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file $pwd\seq_find.json --open-step-editor 1" -PassThru
+          Start-Sleep 7
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_step_find.png")
+          $p | Stop-Process
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "FindTest" } | Stop-Process
+
       - name: Screenshot Read step editor
         shell: pwsh
         run: |
@@ -609,6 +657,7 @@ jobs:
             kp_step_group.png
             kp_group_list.png
             kp_projects.png
+            kp_step_find.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
