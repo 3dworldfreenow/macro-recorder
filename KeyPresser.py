@@ -259,6 +259,127 @@ def screen_area(root):
     return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
 
 
+def draw_box_on_screen(root, on_done, hide=()):
+    """Dim the screen; drag a box with finger or mouse.
+    on_done((left, top, right, bottom)) or on_done(None) if cancelled."""
+    for w in hide:
+        w.withdraw()
+    x0, y0, w, h = screen_area(root)
+    ov = tk.Toplevel(root)
+    ov.overrideredirect(True)
+    ov.geometry(f"{w}x{h}+{x0}+{y0}")
+    ov.attributes("-topmost", True)
+    try:
+        ov.attributes("-alpha", 0.35)
+    except Exception:
+        pass
+    c = tk.Canvas(ov, bg="black", highlightthickness=0, cursor="crosshair")
+    c.pack(fill="both", expand=True)
+    state = {"start": None, "rect": None, "lbl": None}
+
+    ban = tk.Toplevel(root)
+    ban.overrideredirect(True)
+    ban.attributes("-topmost", True)
+    ban.configure(bg="#1e3a5f")
+    tk.Label(ban, text="Drag a box around where the word is", bg="#1e3a5f",
+             fg="white", font=(FONT, 18, "bold")).pack(padx=24, pady=(14, 4))
+    tk.Label(ban, text="press, drag, then let go", bg="#1e3a5f",
+             fg="#cfe0f5", font=(FONT, 11)).pack()
+    tk.Button(ban, text="CANCEL", bg=RED, fg="white", bd=0,
+              activebackground=RED_A, activeforeground="white",
+              font=(FONT, 14, "bold"), padx=30, pady=6,
+              command=lambda: finish(None)).pack(pady=(10, 14))
+    ban.update_idletasks()
+    ban.geometry(f"+{(root.winfo_screenwidth() - ban.winfo_reqwidth()) // 2}"
+                 f"+40")
+
+    def finish(box):
+        for win in (ban, ov):
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        for win in hide:
+            try:
+                win.deiconify()
+            except Exception:
+                pass
+        on_done(box)
+
+    def press(e):
+        state["start"] = (e.x_root, e.y_root)
+        if state["rect"]:
+            c.delete(state["rect"])
+            c.delete(state["lbl"])
+        state["rect"] = c.create_rectangle(
+            e.x_root - x0, e.y_root - y0, e.x_root - x0, e.y_root - y0,
+            outline="#ffeb3b", width=3, fill="white", stipple="gray25")
+        state["lbl"] = c.create_text(e.x_root - x0, e.y_root - y0 - 14,
+                                     anchor="w", fill="#ffeb3b",
+                                     font=(FONT, 12, "bold"), text="")
+
+    def move(e):
+        if not state["start"]:
+            return
+        sx, sy = state["start"]
+        c.coords(state["rect"], sx - x0, sy - y0, e.x_root - x0,
+                 e.y_root - y0)
+        c.coords(state["lbl"], min(sx, e.x_root) - x0,
+                 min(sy, e.y_root) - y0 - 14)
+        c.itemconfig(state["lbl"], text=f"{abs(e.x_root - sx)} × "
+                                        f"{abs(e.y_root - sy)}")
+
+    def release(e):
+        if not state["start"]:
+            return
+        sx, sy = state["start"]
+        l, r = sorted((sx, e.x_root))
+        t, b = sorted((sy, e.y_root))
+        if r - l < 8 or b - t < 8:          # just a tap: try again
+            state["start"] = None
+            return
+        finish((l, t, r, b))
+
+    c.bind("<ButtonPress-1>", press)
+    c.bind("<B1-Motion>", move)
+    c.bind("<ButtonRelease-1>", release)
+    ov.bind("<Escape>", lambda e: finish(None))
+
+    def raise_banner():
+        try:
+            ov.focus_force()
+            ban.attributes("-topmost", False)
+            ban.attributes("-topmost", True)
+            ban.lift(ov)
+        except Exception:
+            pass
+
+    ov.after(50, raise_banner)
+    ov.after(400, raise_banner)
+
+
+def show_box_overlay(root, box, secs=2.5, color="#ffeb3b"):
+    """Outline a box on screen for a moment (click-through)."""
+    x0, y0, w, h = screen_area(root)
+    key = "#ff00fe"
+    ov = tk.Toplevel(root)
+    ov.overrideredirect(True)
+    ov.attributes("-topmost", True)
+    try:
+        ov.attributes("-transparentcolor", key)
+    except Exception:
+        pass
+    ov.geometry(f"{w}x{h}+{x0}+{y0}")
+    c = tk.Canvas(ov, bg=key, highlightthickness=0)
+    c.pack(fill="both", expand=True)
+    l, t, r, b = box
+    c.create_rectangle(l - x0, t - y0, r - x0, b - y0, outline=color,
+                       width=4)
+    c.create_text(l - x0 + 4, t - y0 - 14, anchor="w", fill=color,
+                  font=(FONT, 12, "bold"), text=f"{int(r - l)} × {int(b - t)}")
+    ov.after(int(secs * 1000), ov.destroy)
+
+
 def pick_on_screen(root, on_done, hide=()):
     """Dim the screen; the next tap gives its position (or None if
     cancelled)."""
@@ -1089,6 +1210,57 @@ class Dialog(tk.Toplevel):
 
         pick_on_screen(wins[-1], done, hide=wins)
 
+    def draw_box_into(self, xv, yv, awv, ahv, after=None):
+        """Drag a box on screen; store its centre and size."""
+        self.grab_release()
+        wins = self.chain()
+
+        def done(box):
+            if box:
+                l, t, r, b = box
+                xv.set(str(int((l + r) / 2)))
+                yv.set(str(int((t + b) / 2)))
+                awv.set(str(int(r - l)))
+                ahv.set(str(int(b - t)))
+                if after:
+                    after()
+            for w in reversed(wins[1:]):
+                w.deiconify()
+            self.deiconify()
+            self.lift()
+            self.grab_set()
+
+        draw_box_on_screen(wins[-1], done, hide=wins)
+
+    def show_box(self, xv, yv, awv, ahv):
+        cx, cy = fnum(xv.get()), fnum(yv.get())
+        aw, ah = fnum(awv.get(), 300), fnum(ahv.get(), 60)
+        wins = self.chain()
+        for w in wins:
+            w.withdraw()
+        show_box_overlay(wins[-1], (cx - aw / 2, cy - ah / 2, cx + aw / 2,
+                                    cy + ah / 2), 2.5)
+
+        def back():
+            for w in reversed(wins):
+                w.deiconify()
+            self.lift()
+
+        self.after(2600, back)
+
+    def box_buttons(self, master, after=None, size=12):
+        """[ ▭ Draw box ] [ 👁 Show box ] row bound to x/y/aw/ah."""
+        row = tk.Frame(master, bg=self.BG)
+        big_button(row, "▭  Draw box on screen",
+                   lambda: self.draw_box_into(self.x, self.y, self.aw,
+                                              self.ah, after),
+                   bg="#6a1b9a", abg="#8e24aa", size=size, pady=8
+                   ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        soft_button(row, "👁 Show box",
+                    lambda: self.show_box(self.x, self.y, self.aw, self.ah),
+                    size=size - 1).pack(side="left")
+        return row
+
     def wait_row(self, master, amin, amax, text="Then wait (sec):"):
         r = tk.Frame(master, bg=self.BG)
         self.label(r, text).pack(anchor="w")
@@ -1307,9 +1479,10 @@ class StepDialog(Dialog):
 
         # --- read panel
         rd = self.read_panel = tk.Frame(self.area, bg=self.BG)
-        big_button(rd, "📍  Pick the spot to read",
-                   lambda: self.pick_into(self.x, self.y), size=13,
-                   pady=9).pack(fill="x")
+        self.box_buttons(rd).pack(fill="x")
+        soft_button(rd, "📍 or pick just a point (centre)",
+                    lambda: self.pick_into(self.x, self.y), size=11
+                    ).pack(anchor="w", pady=(4, 0))
         xy2 = tk.Frame(rd, bg=self.BG)
         xy2.pack(anchor="w", pady=6)
         self.label(xy2, "X ").pack(side="left")
@@ -1394,8 +1567,10 @@ class StepDialog(Dialog):
         self.label(fp, "Tip: Equals is best for short button words like "
                        "\u201cBack\u201d.", size=10, bold=False,
                    fg="#666").pack(anchor="w")
+        self.box_buttons(fp, after=lambda: self.f_whole.set(False)
+                         ).pack(fill="x", pady=(8, 4))
         Toggle(fp, "Search the whole screen", self.f_whole
-               ).pack(fill="x", pady=(8, 0))
+               ).pack(fill="x")
         self.f_area = tk.Frame(fp, bg=self.BG)
         soft_button(self.f_area, "📍 Pick centre of search box",
                     lambda: self.pick_into(self.x, self.y)).pack(anchor="w")
@@ -1533,9 +1708,10 @@ class StepDialog(Dialog):
         self.p_textbox.pack(fill="x")
 
         self.p_ocr = tk.Frame(pp, bg=self.BG)
-        big_button(self.p_ocr, "📍  Pick the spot to read",
-                   lambda: self.pick_into(self.x, self.y), size=12,
-                   pady=7).pack(fill="x")
+        self.box_buttons(self.p_ocr).pack(fill="x")
+        soft_button(self.p_ocr, "📍 or pick just a point (centre)",
+                    lambda: self.pick_into(self.x, self.y), size=11
+                    ).pack(anchor="w", pady=(4, 0))
         r1 = tk.Frame(self.p_ocr, bg=self.BG)
         r1.pack(anchor="w", pady=4)
         self.label(r1, "X ").pack(side="left")
@@ -2634,6 +2810,13 @@ class App:
             root.after(int(args.pause_at * 1000), self.toggle_pause)
             root.after(int((args.pause_at + args.pause_for) * 1000),
                        self.toggle_pause)
+        if args.draw_box_test:
+            def _box_done(box):
+                self.log(f"box {' '.join(str(int(v)) for v in box)}"
+                         if box else "box none")
+                self.root.after(100, self.close)
+            root.after(800, lambda: draw_box_on_screen(
+                self.root, _box_done, hide=(self.root,)))
         if args.show_keyboard:
             root.after(1500, open_touch_keyboard)
         if args.open_projects:
@@ -4381,6 +4564,7 @@ def main():
     p.add_argument("--seq", default="", help="sequence name to select")
     p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--show-keyboard", action="store_true")
+    p.add_argument("--draw-box-test", action="store_true")
     p.add_argument("--pause-at", type=float, default=0)
     p.add_argument("--pause-for", type=float, default=0)
     p.add_argument("--ui-size", choices=list(SIZES), default=None)
