@@ -26,6 +26,7 @@ import argparse
 import ctypes
 import re
 import json
+import shutil
 import os
 import queue
 import random
@@ -56,6 +57,52 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(BASE_DIR, "keypresser_settings.json")
+PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
+# what belongs to a project (everything else is an app-wide setting)
+PROJECT_KEYS = ("seqs", "cur", "steps", "loops", "key_on", "key", "kmin",
+                "kmax", "limit", "pmin", "pmax", "restore", "points",
+                "points_on", "links_on", "links")
+
+
+def safe_name(name):
+    return re.sub(r'[\\/:*?"<>|]+', "_", (name or "").strip()) or "Project"
+
+
+def project_path(name):
+    return os.path.join(PROJECTS_DIR, safe_name(name) + ".json")
+
+
+def list_projects():
+    try:
+        return sorted((f[:-5] for f in os.listdir(PROJECTS_DIR)
+                       if f.lower().endswith(".json")), key=str.lower)
+    except OSError:
+        return []
+
+
+def read_project(name):
+    try:
+        with open(project_path(name), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_project(name, data):
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    d = {k: v for k, v in data.items() if k in PROJECT_KEYS}
+    d["keypresser_project"] = 1
+    path = project_path(name)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def new_project_data():
+    return {"seqs": [{"name": "Sequence 1", "loops": "0", "steps": []}],
+            "cur": 0}
 
 # name -> keys pressed together
 KEYS = {
@@ -1801,6 +1848,179 @@ class SeqListDialog(Dialog):
         self.destroy()
 
 
+class ProjectsDialog(Dialog):
+    """Each project is its own JSON file in the 'projects' folder."""
+
+    def __init__(self, app):
+        super().__init__(app.root, "Projects")
+        self.app = app
+        app._save_settings()
+        self.label(self.body, "Each project is saved as its own file:",
+                   bold=False, fg="#555").pack(anchor="w")
+        self.label(self.body, PROJECTS_DIR, size=10, bold=False,
+                   fg="#1565c0").pack(anchor="w")
+        fr = tk.Frame(self.body, bg=self.BG)
+        fr.pack(fill="both", expand=True, pady=6)
+        self.tv = ttk.Treeview(fr, columns=("name", "seqs", "changed"),
+                               show="headings", height=7, selectmode="browse")
+        for c, t, w, a in (("name", "Project", 230, "w"),
+                           ("seqs", "Sequences", 90, "center"),
+                           ("changed", "Last changed", 150, "center")):
+            self.tv.heading(c, text=t)
+            self.tv.column(c, width=sz(w), anchor=a)
+        sb = ttk.Scrollbar(fr, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.bind("<Double-1>", lambda e: self.ok())
+        g = tk.Frame(self.body, bg=self.BG)
+        g.pack(fill="x")
+        for i, (t, cmd) in enumerate((("➕ New", self.new),
+                                      ("✏ Rename", self.rename),
+                                      ("⧉ Copy", self.copy),
+                                      ("🗑 Delete", self.delete),
+                                      ("📥 Import file", self.import_file),
+                                      ("💾 Export file", self.export_file),
+                                      ("📂 Open folder", self.open_folder))):
+            soft_button(g, t, cmd, size=11).grid(row=i // 4, column=i % 4,
+                                                 sticky="ew", padx=3, pady=3)
+        for c in range(4):
+            g.columnconfigure(c, weight=1, uniform="b")
+        self.info = self.label(self.body, "", size=10, bold=False,
+                               fg="#2e7d32")
+        self.info.pack(anchor="w", pady=(4, 0))
+        self.refresh(app.project)
+        self.footer()
+        self.foot.winfo_children()[0].config(text="✔  Open")
+
+    def msg(self, text, ok=True):
+        self.info.config(text=text, fg="#2e7d32" if ok else RED)
+
+    def sel(self):
+        s = self.tv.selection()
+        return s[0] if s else None
+
+    def refresh(self, select=None):
+        self.tv.delete(*self.tv.get_children())
+        for name in list_projects():
+            d = read_project(name)
+            try:
+                t = time.strftime("%d %b %Y %H:%M", time.localtime(
+                    os.path.getmtime(project_path(name))))
+            except OSError:
+                t = ""
+            self.tv.insert("", "end", iid=name, values=(
+                ("▶ " if name == self.app.project else "") + name,
+                len(d.get("seqs", [])), t))
+        if select and self.tv.exists(select):
+            self.tv.selection_set(select)
+            self.tv.see(select)
+
+    def unique(self, name):
+        have = {n.lower() for n in list_projects()}
+        name = safe_name(name)
+        if name.lower() not in have:
+            return name
+        k = 2
+        while f"{name} ({k})".lower() in have:
+            k += 1
+        return f"{name} ({k})"
+
+    def new(self):
+        name = NameDialog(self, "New project",
+                          self.unique(f"Project {len(list_projects()) + 1}")
+                          ).run()
+        if name:
+            name = self.unique(name)
+            write_project(name, new_project_data())
+            self.refresh(name)
+            self.msg(f"✔ Made \u201c{name}\u201d - tap Open to use it")
+
+    def rename(self):
+        old = self.sel()
+        if not old:
+            return
+        name = NameDialog(self, "Rename project", old).run()
+        if not name or safe_name(name) == old:
+            return
+        name = self.unique(name)
+        os.replace(project_path(old), project_path(name))
+        if old == self.app.project:
+            self.app.project = name
+            self.app._save_settings()
+            self.app.proj_btn.config(text=f"📁  {name}  ▾")
+        self.refresh(name)
+        self.msg(f"✔ Renamed to \u201c{name}\u201d")
+
+    def copy(self):
+        src = self.sel()
+        if not src:
+            return
+        name = self.unique(src + " copy")
+        shutil.copyfile(project_path(src), project_path(name))
+        self.refresh(name)
+        self.msg(f"✔ Copied to \u201c{name}\u201d")
+
+    def delete(self):
+        name = self.sel()
+        if not name:
+            return
+        if name == self.app.project:
+            messagebox.showinfo("Delete", "This project is open. Open "
+                                "another project first, then delete this one.",
+                                parent=self)
+            return
+        if messagebox.askyesno("Delete", f"Delete project \u201c{name}\u201d?"
+                               "\nIts file will be removed.", parent=self):
+            os.remove(project_path(name))
+            self.refresh(self.app.project)
+            self.msg(f"✔ Deleted \u201c{name}\u201d")
+
+    def import_file(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="Import project",
+            filetypes=[("KeyPresser project", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict) or not isinstance(d.get("seqs"), list):
+                raise ValueError("not a KeyPresser project or sequences file")
+            name = self.unique(os.path.splitext(os.path.basename(path))[0])
+            write_project(name, d)
+            self.refresh(name)
+            self.msg(f"✔ Imported as \u201c{name}\u201d")
+        except Exception as e:
+            self.msg(f"✖ Could not import: {e}", ok=False)
+
+    def export_file(self):
+        name = self.sel()
+        if not name:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Export project", defaultextension=".json",
+            initialfile=name + ".json",
+            filetypes=[("KeyPresser project", "*.json")])
+        if path:
+            try:
+                shutil.copyfile(project_path(name), path)
+                self.msg(f"✔ Saved a copy to {os.path.basename(path)}")
+            except Exception as e:
+                self.msg(f"✖ Could not export: {e}", ok=False)
+
+    def open_folder(self):
+        try:
+            os.makedirs(PROJECTS_DIR, exist_ok=True)
+            os.startfile(PROJECTS_DIR)
+        except Exception as e:
+            self.msg(f"✖ {e}", ok=False)
+
+    def ok(self):
+        self.result = self.sel() or self.app.project
+        self.destroy()
+
+
 class KeyChooser(Dialog):
     def __init__(self, parent, current):
         super().__init__(parent, "Choose key")
@@ -1909,6 +2129,10 @@ class App:
                        self.toggle_pause)
         if args.show_keyboard:
             root.after(1500, open_touch_keyboard)
+        if args.open_projects:
+            root.after(800, self.open_projects)
+        if args.quit_soon:
+            root.after(int(args.quit_soon * 1000), self.close)
         if args.open_seq_list:
             root.after(800, self.open_seq_list)
         if args.open_step_editor is not None:
@@ -1917,12 +2141,37 @@ class App:
     # ---------------------------------------------------------- settings
     def _load_settings(self):
         s = {}
+        self.project = "Test"
         if not self.args.no_settings:
             try:
                 with open(SETTINGS_FILE, encoding="utf-8") as f:
                     s = json.load(f)
             except Exception:
                 s = {}
+            try:
+                os.makedirs(PROJECTS_DIR, exist_ok=True)
+                names = list_projects()
+                want = (self.args.project or s.get("project")
+                        or (names[0] if names else "My project"))
+                found = next((n for n in names
+                              if n.lower() == safe_name(want).lower()), None)
+                if found is None:
+                    # first project ever: bring in the old settings
+                    data = ({k: s[k] for k in PROJECT_KEYS if k in s}
+                            if not names else {})
+                    write_project(want, data or new_project_data())
+                    found = safe_name(want)
+                self.project = found
+                pdata = read_project(found)
+                for k in PROJECT_KEYS:
+                    s.pop(k, None)
+                s.update({k: v for k, v in pdata.items() if k in PROJECT_KEYS})
+            except Exception:
+                pass
+        return self._take_project(s)
+
+    def _take_project(self, s):
+        """Load sequences / points / links from settings dict s."""
         self.points = s.get("points", [])
         self.links = s.get("links", [])
         seqs = s.get("seqs")
@@ -1950,11 +2199,58 @@ class App:
         if self.args.no_settings:
             return
         data = self._state()
+        app = {k: v for k, v in data.items() if k not in PROJECT_KEYS}
+        app["project"] = self.project
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=1)
+                json.dump(app, f, indent=1)
         except Exception:
             pass
+        try:
+            write_project(self.project, data)
+        except Exception as e:
+            try:
+                self.status.set(f"Could not save project: {e}")
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------- projects
+    def _rebuild(self, s, tab=None):
+        for w in self.root.winfo_children():
+            w.destroy()
+        self._style()
+        self._build_ui(s)
+        self._refresh_all()
+        if tab is not None:
+            self.nb.select(tab)
+
+    def switch_project(self, name):
+        if self.running() or self.args.no_settings:
+            return
+        self._save_settings()
+        pdata = read_project(name) or new_project_data()
+        s = self._state()
+        for k in PROJECT_KEYS:
+            s.pop(k, None)
+        s.update({k: v for k, v in pdata.items() if k in PROJECT_KEYS})
+        self.project = name
+        tab = self.nb.index("current")
+        self._take_project(s)
+        self._rebuild(s, tab)
+        self._save_settings()
+        self.status.set(f"Opened project \u201c{name}\u201d")
+
+    def open_projects(self):
+        if self.running():
+            return
+        if self.args.no_settings and not self.args.open_projects:
+            self.status.set("Projects are off in test mode")
+            return
+        r = ProjectsDialog(self).run()
+        if r and r != self.project:
+            self.switch_project(r)
+        elif hasattr(self, "proj_btn"):
+            self.proj_btn.config(text=f"📁  {self.project}  ▾")
 
     def _apply_cli(self):
         a = self.args
@@ -2057,7 +2353,11 @@ class App:
         bot.pack(side="bottom", fill="x")      # always visible
         topbar = tk.Frame(r, bg=self.BG, padx=8, pady=6)
         topbar.pack(side="top", fill="x")
-        tk.Label(topbar, text="KeyPresser", bg=self.BG, fg="#37474f",
+        self.proj_btn = big_button(topbar, f"📁  {self.project}  ▾",
+                                   self.open_projects, bg="#37474f",
+                                   abg="#455a64", size=12, padx=12, pady=7)
+        self.proj_btn.pack(side="left")
+        tk.Label(topbar, text="", bg=self.BG, fg="#37474f",
                  font=(FONT, sz(14), "bold")).pack(side="left")
         keyboard_button(topbar).pack(side="right")
         soft_button(topbar, f"Aa  {self.ui_size}", self.next_ui_size,
@@ -2343,12 +2643,7 @@ class App:
         self.ui_size = nxt
         s["ui_size"] = nxt
         SCALE = SIZES[nxt]
-        for w in self.root.winfo_children():
-            w.destroy()
-        self._style()
-        self._build_ui(s)
-        self._refresh_all()
-        self.nb.select(tab)
+        self._rebuild(s, tab)
         self._save_settings()
         self.status.set(f"Size: {nxt}")
 
@@ -3501,6 +3796,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=["sequence", "timers"], default=None)
     p.add_argument("--seq-file", default="")
+    p.add_argument("--project", default="")
+    p.add_argument("--open-projects", action="store_true")
+    p.add_argument("--quit-soon", type=float, default=0)
     p.add_argument("--seq", default="", help="sequence name to select")
     p.add_argument("--open-seq-list", action="store_true")
     p.add_argument("--show-keyboard", action="store_true")

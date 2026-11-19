@@ -515,6 +515,40 @@ jobs:
           "RUN AND RETURN TEST PASSED"
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
 
+      - name: Test projects (separate JSON per project)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $d = "dist\KeyPresser"
+          Remove-Item "$d\projects" -Recurse -ErrorAction SilentlyContinue
+          Remove-Item "$d\keypresser_settings.json" -ErrorAction SilentlyContinue
+          Start-Process "$d\KeyPresser.exe" -ArgumentList "--project P1 --seq-file $pwd\tests\seq_once.json --quit-soon 4" -PassThru | Wait-Process -Timeout 60
+          Start-Process "$d\KeyPresser.exe" -ArgumentList "--project P2 --seq-file $pwd\tests\seq_multi.json --quit-soon 4" -PassThru | Wait-Process -Timeout 60
+          "Files:"; Get-ChildItem "$d\projects" | Select-Object -ExpandProperty Name
+          $p1 = Get-Content "$d\projects\P1.json" -Raw | ConvertFrom-Json
+          $p2 = Get-Content "$d\projects\P2.json" -Raw | ConvertFrom-Json
+          $st = Get-Content "$d\keypresser_settings.json" -Raw | ConvertFrom-Json
+          "P1 sequences: $($p1.seqs.name -join ', ')   first key: $($p1.seqs[0].steps[0].key)"
+          "P2 sequences: $($p2.seqs.name -join ', ')"
+          "Last project in settings: $($st.project)"
+          if ($p1.seqs[0].steps[0].key -ne "Home") { throw "P1 has wrong content" }
+          if (($p2.seqs.name -join ',') -ne "Alpha,Beta") { throw "P2 has wrong content" }
+          if ($st.project -ne "P2") { throw "settings should remember P2" }
+          if ($st.PSObject.Properties.Name -contains "seqs") { throw "sequences must not be in app settings" }
+          Start-Process "$d\KeyPresser.exe" -ArgumentList "--project P1 --mode sequence --start --delay 1 --quit-when-done --log $pwd\proj_log.txt" -PassThru | Wait-Process -Timeout 60
+          $order = (Get-Content proj_log.txt | ForEach-Object { $_.Split(' ')[5] }) -join ','
+          "P1 run: $order"
+          if ($order -ne "Home,End,End,End") { throw "running P1 should run P1's sequence" }
+          $p = Start-Process "$d\KeyPresser.exe" -ArgumentList "--open-projects" -PassThru
+          Start-Sleep 7
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_projects.png")
+          $p | Stop-Process
+          Remove-Item "$d\projects" -Recurse -ErrorAction SilentlyContinue
+          Remove-Item "$d\keypresser_settings.json" -ErrorAction SilentlyContinue
+          "PROJECTS TEST PASSED"
+
       - name: Screenshot Group step editor
         shell: pwsh
         run: |
@@ -572,6 +606,7 @@ jobs:
             kp_step_paste.png
             kp_step_group.png
             kp_group_list.png
+            kp_projects.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
