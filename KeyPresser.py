@@ -23,7 +23,9 @@ import sys as _sys
 _sys.coinit_flags = 0          # comtypes: use a multithreaded COM apartment
 
 import argparse
+import ast
 import ctypes
+import math
 import re
 import json
 import shutil
@@ -981,10 +983,77 @@ def pair_matches(mode, find, text):
     return find.lower() in text.lower() if find else bool(text.strip())
 
 
-def fill_placeholders(paste, read_text):
+def fill_placeholders(paste, read_text, variables=None):
     m = NUM_RE.search(read_text or "")
-    return (paste.replace("{read}", (read_text or "").strip())
-            .replace("{number}", m.group().replace(",", "") if m else ""))
+    out = (paste.replace("{read}", (read_text or "").strip())
+           .replace("{number}", m.group().replace(",", "") if m else ""))
+    for k, v in (variables or {}).items():
+        out = out.replace("{" + k + "}", fmt(v))
+    return out
+
+
+# ---------------------------------------------------------------------
+# variables and small formulas, e.g. "n", "n/10", "min(n, 50)"
+# ---------------------------------------------------------------------
+FORMULA_FUNCS = {"min": min, "max": max, "round": round, "abs": abs,
+                 "floor": math.floor, "ceil": math.ceil}
+_FORMULA_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+                  ast.Name, ast.Load, ast.Call, ast.Add, ast.Sub, ast.Mult,
+                  ast.Div, ast.FloorDiv, ast.Mod, ast.USub, ast.UAdd)
+VAR_RE = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def check_formula(expr):
+    """Raise ValueError if expr is not a simple formula."""
+    tree = ast.parse(expr.strip(), mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, _FORMULA_NODES):
+            raise ValueError("only numbers, names and + - * / ( ) are allowed")
+        if isinstance(node, ast.Call):
+            if not (isinstance(node.func, ast.Name)
+                    and node.func.id in FORMULA_FUNCS) or node.keywords:
+                raise ValueError("allowed functions: min, max, round, floor, "
+                                 "ceil, abs")
+        if isinstance(node, ast.Constant) and not isinstance(
+                node.value, (int, float)):
+            raise ValueError("only numbers are allowed")
+    return tree
+
+
+def calc_formula(expr, variables):
+    tree = check_formula(expr)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id not in FORMULA_FUNCS
+                and node.id not in variables):
+            raise NameError(f"\u201c{node.id}\u201d has no number yet (add a "
+                            f"Read step that saves it)")
+    env = dict(FORMULA_FUNCS)
+    env.update(variables)
+    return eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, env)
+
+
+def number_from(st, text):
+    """The number a Read step saves: the first bracket group of a Regex
+    if it holds a number, otherwise the first number in the text."""
+    text = text or ""
+    if st.get("mmode") == "regex" and st.get("pattern"):
+        try:
+            m = re.search(st["pattern"], text, re.I)
+        except re.error:
+            m = None
+        if m:
+            for g in m.groups():
+                if g and NUM_RE.search(g):
+                    text = g
+                    break
+    m = NUM_RE.search(text)
+    if not m:
+        return None
+    try:
+        v = float(m.group().replace(",", ""))
+    except ValueError:
+        return None
+    return int(v) if v == int(v) else v
 
 
 ACTIONS = ["Continue", "Go to step", "Next loop", "Stop", "Next sequence",
@@ -1417,7 +1486,9 @@ class StepDialog(Dialog):
         self.y = tk.StringVar(value=str(s.get("y", 0)))
         self.btn = tk.StringVar(value=s.get("button", "Left"))
         self.key = tk.StringVar(value=s.get("key", "Right Arrow (next)"))
-        self.times = tk.StringVar(value=fmt(s.get("times", 1)))
+        self.times = tk.StringVar(value=s.get("times_expr")
+                                  or fmt(s.get("times", 1)))
+        self.save_as = tk.StringVar(value=s.get("save_as", ""))
         self.tmin = tk.StringVar(value=fmt(s.get("tmin", 0.5)))
         self.tmax = tk.StringVar(value=fmt(s.get("tmax", 1)))
         self.url = tk.StringVar(value=s.get("url", ""))
@@ -1476,7 +1547,10 @@ class StepDialog(Dialog):
         r1 = tk.Frame(rp, bg=self.BG)
         r1.pack(anchor="w")
         self.label(r1, "How many times:  ").pack(side="left")
-        NumField(r1, self.times, step=1, minv=1).pack(side="left")
+        NumField(r1, self.times, step=1, minv=1, width=10).pack(side="left")
+        self.label(rp, "A number, or a formula with a saved number: n · n/10 "
+                       "(rounds down) · n-5 · min(n, 50) · ceil(n/10)",
+                   size=10, bold=False, fg="#666").pack(anchor="w")
         self.wait_row(rp, self.tmin, self.tmax,
                       "Gap between those times (sec):").pack(anchor="w",
                                                              pady=(8, 0))
@@ -1513,6 +1587,16 @@ class StepDialog(Dialog):
         tk.Label(tr, textvariable=self.read_result, bg=self.BG, fg="#0d47a1",
                  font=(FONT, sz(11)), wraplength=sz(330), justify="left",
                  anchor="w").pack(side="left", padx=8, fill="x", expand=True)
+
+        sv = tk.Frame(rd, bg=self.BG)
+        sv.pack(fill="x", pady=(0, 6))
+        self.label(sv, "📥 Save the number as: ").pack(side="left")
+        tk.Entry(sv, textvariable=self.save_as, font=(FONT, sz(13)),
+                 relief="solid", bd=1, width=8).pack(side="left", ipady=sz(4))
+        self.label(rd, "e.g. n → \u201c1,23 unread\u201d saves 123. Use it in "
+                       "\u201cHow many times\u201d (n, n/10…) or as {n} in Paste "
+                       "text. With Regex, a ( ) group picks which number.",
+                   size=10, bold=False, fg="#666").pack(anchor="w")
 
         self.label(rd, "Text must:").pack(anchor="w")
         Choice(rd, self.mmode, ["Contains", "Equals", "Regex", "Number"],
@@ -2100,8 +2184,21 @@ class StepDialog(Dialog):
         if k in ("click", "key", "group"):
             tmin, tmax = sorted((max(0, fnum(self.tmin.get())),
                                  max(0, fnum(self.tmax.get()))))
-            st.update(times=max(1, int(fnum(self.times.get(), 1))),
-                      tmin=tmin, tmax=tmax)
+            tv = self.times.get().strip() or "1"
+            try:
+                times = max(1, int(float(tv)))
+                st.pop("times_expr", None)
+            except ValueError:
+                try:
+                    check_formula(tv)
+                except (ValueError, SyntaxError) as e:
+                    messagebox.showerror(
+                        "Step", f"\u201cHow many times\u201d must be a number or "
+                                f"a formula like n/10.\n\n{e}", parent=self)
+                    return
+                times = 1
+                st["times_expr"] = tv
+            st.update(times=times, tmin=tmin, tmax=tmax)
         if k == "click":
             st.update(x=int(fnum(self.x.get())), y=int(fnum(self.y.get())),
                       button=self.btn.get())
@@ -2120,7 +2217,13 @@ class StepDialog(Dialog):
                       on_no=self.on_no.get(),
                       no_step=max(1, int(fnum(self.no_step.get(), 1))),
                       yes_seq=self.yes_seq.get(), no_seq=self.no_seq.get(),
+                      save_as=self.save_as.get().strip(),
                       **self._read_rule())
+            if st["save_as"] and not VAR_RE.match(st["save_as"]):
+                messagebox.showerror("Step", "The name to save the number as "
+                                     "must be one word, like n or unread",
+                                     parent=self)
+                return
             if st["mmode"] == "regex":
                 try:
                     re.compile(st["pattern"])
@@ -2799,12 +2902,14 @@ def describe(st):
                 if mm == "number" else f"\u201c{st.get('pattern', '')}\u201d")
 
         return (f"🔍 Read ({st['x']}, {st['y']}) {mm} {rule} → "
-                f"✔ {action_text(st, True)} / ✖ {action_text(st, False)}")
+                f"✔ {action_text(st, True)} / ✖ {action_text(st, False)}"
+                + (f"  · 📥 {st['save_as']}" if st.get("save_as") else ""))
     else:
         return "⏱ Wait"
     n = int(st.get("times", 1))
-    if t in ("click", "key", "group") and n > 1:
-        d += f"  × {n}  (gap {span(st.get('tmin', 0), st.get('tmax', 0))}s)"
+    if t in ("click", "key", "group") and (n > 1 or st.get("times_expr")):
+        d += (f"  × {st.get('times_expr') or n}  "
+              f"(gap {span(st.get('tmin', 0), st.get('tmax', 0))}s)")
     return d
 
 
@@ -4184,7 +4289,7 @@ class App:
             self.mi_counts.config(
                 text=f"🖱 {c.get('click', 0)}   ⌨ {c.get('key', 0)}   "
                      f"🔗 {c.get('link', 0)}   🔍 {c.get('read', 0)}   "
-                     f"📋 {c.get('paste', 0)}")
+                     f"📋 {c.get('paste', 0)}" + self._vars_text("\n📥 "))
             r = lv.get("read")
             if r:
                 src = {"uia": "Windows text", "ocr": "OCR"}.get(r["src"],
@@ -4256,7 +4361,14 @@ class App:
     def _counts_text(self):
         c = self.live.get("counts", {}) if self.live else {}
         return (f"Clicks: {c.get('click', 0)} · Keys: {c.get('key', 0)} · "
-                f"Links: {c.get('link', 0)} · Reads: {c.get('read', 0)}")
+                f"Links: {c.get('link', 0)} · Reads: {c.get('read', 0)}"
+                + self._vars_text(" · "))
+
+    def _vars_text(self, prefix):
+        v = self.live.get("vars") if self.live else None
+        if not v:
+            return ""
+        return prefix + ", ".join(f"{k} = {fmt(x)}" for k, x in v.items())
 
     def _update_mini_rect(self):
         m = self.mini
@@ -4362,7 +4474,7 @@ class App:
         if not self.countdown(cfg["delay"]):
             self.q.put(("finished", "Stopped"))
             return
-        ctx = {"seqs": seqs, "cur": cur, "n": n, "test": test,
+        ctx = {"seqs": seqs, "cur": cur, "n": n, "test": test, "vars": {},
                "stop_reason": "", "loop": 0, "total": "", "sname": ""}
         switched = False
         while not self.stop.is_set():
@@ -4487,7 +4599,18 @@ class App:
                         f"Step {sid}" + (f"  ·  {nm}" if nm else ""),
                 "desc": describe(st)}))
             t = st.get("type")
-            times = max(1, int(st.get("times", 1)))
+            if st.get("times_expr"):
+                try:
+                    times = int(math.floor(calc_formula(
+                        st["times_expr"], ctx["vars"])))
+                except Exception as e:
+                    return self._halt(ctx, f"step {sid}: {e}")
+                self.log(f"seq {loop} {sid} times {st['times_expr']}={times}")
+                self.q.put(("status", f"{label} · × {st['times_expr']} = "
+                                      f"{max(0, times)}"))
+                times = max(0, times)
+            else:
+                times = max(1, int(st.get("times", 1)))
             sig = None
             if t in ("click", "key"):
                 for k in range(times):
@@ -4557,12 +4680,12 @@ class App:
                         "rule": f"{len(pairs)} pair(s), {mode}",
                         "final": True,
                         "action": (f"paste \u201c"
-                                   f"{fill_placeholders(out, rtext)[:30]}"
+                                   f"{fill_placeholders(out, rtext, ctx['vars'])[:30]}"
                                    f"\u201d" if out is not None else why)}))
                 else:
                     out = st.get("text", "")
                 if out is not None:
-                    out = fill_placeholders(out, rtext)
+                    out = fill_placeholders(out, rtext, ctx["vars"])
                     if st.get("click_first"):
                         self.do_click(st.get("cx", 0), st.get("cy", 0),
                                       "Left", True)
@@ -4581,6 +4704,12 @@ class App:
             elif t == "read":
                 ok, text, src = self.do_read(st, label)
                 n["read"] += 1
+                if st.get("save_as"):
+                    val = number_from(st, text)
+                    if val is not None:
+                        ctx["vars"][st["save_as"]] = val
+                        self.log(f"seq {loop} {sid} save {st['save_as']} {val}")
+                        self.q.put(("live", {"vars": dict(ctx["vars"])}))
                 self.q.put(("count", n))
                 self.q.put(("read", {
                     "text": text, "src": src, "ok": ok,

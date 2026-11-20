@@ -695,6 +695,39 @@ jobs:
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
           "RECORD TEST PASSED"
 
+      - name: Test variables (Read saves n, times = formula, {n} in paste)
+        shell: pwsh
+        run: |
+          Remove-Item texttest_box.txt -ErrorAction SilentlyContinue
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\texttest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          $pos = (Get-Content texttest_pos.txt).Split(' ')
+          $x=[int]$pos[0]; $y=[int]$pos[1]; $bx=[int]$pos[4]; $by=[int]$pos[5]
+          $steps = @(
+            @{type="read"; name="save n"; x=$x; y=$y; aw=300; ah=70; method="auto"; mmode="regex"; pattern="score\W*(\d+)"; save_as="n"; on_yes="Continue"; on_no="Stop"; amin=0; amax=0},
+            @{type="key"; key="Home"; name="n/10 times"; times=1; times_expr="n/10"; tmin=0.1; tmax=0.1; amin=0.2; amax=0.2},
+            @{type="group"; name="n-40 times"; times=1; times_expr="n-40"; tmin=0.1; tmax=0.1; amin=0.2; amax=0.2; steps=@(@{type="key"; key="End"; amin=0; amax=0})},
+            @{type="key"; key="Up Arrow"; name="skipped (n-100 <= 0)"; times=1; times_expr="n-100"; amin=0; amax=0},
+            @{type="paste"; name="paste n"; click_first=$true; cx=$bx; cy=$by; source="fixed"; text="n={n} half={n}"; how="type"; amin=0.3; amax=0.3}
+          )
+          @{loops=1; steps=$steps} | ConvertTo-Json -Depth 8 | Set-Content seq_vars.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_vars.json --start --no-settings --delay 1 --quit-when-done --log $pwd\vars_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 90 -ErrorAction SilentlyContinue
+          "--- vars log"; Get-Content vars_log.txt
+          $log = Get-Content vars_log.txt
+          $home_ = @($log | Where-Object { $_ -match " key Home$" }).Count
+          $end_ = @($log | Where-Object { $_ -match " key End$" }).Count
+          $up_ = @($log | Where-Object { $_ -match " key Up Arrow$" }).Count
+          $box = [IO.File]::ReadAllText("$pwd\texttest_box.txt")
+          "saved: $(@($log | Where-Object { $_ -match ' save n 42$' }).Count) · Home x$home_ · End x$end_ · Up x$up_ · box [$box]"
+          if (-not ($log -match " save n 42$")) { throw "n should be 42" }
+          if ($home_ -ne 4) { throw "Home should run n/10 = 4 times" }
+          if ($end_ -ne 2) { throw "group should run n-40 = 2 times" }
+          if ($up_ -ne 0) { throw "n-100 is negative, step should be skipped" }
+          if ($box -ne "n=42 half=42") { throw "paste should be n=42 half=42" }
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
+          "VARIABLES TEST PASSED"
+
       - name: Screenshot Find step editor and test-find boxes
         shell: pwsh
         run: |
