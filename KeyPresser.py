@@ -863,6 +863,25 @@ def find_targets(st):
     return target, ordered, src, err
 
 
+def count_on_screen(st):
+    """For the Count step. Returns (value or None, matches, source, error)."""
+    if st.get("by") == "read":
+        x0, y0, w, h = find_area(st)
+        text, src, err = read_screen_text(
+            st.get("method", "auto"), x0 + w / 2, y0 + h / 2, w, h,
+            want=lambda t: number_from({"mmode": "regex",
+                                        "pattern": st.get("keyword", "")}
+                                       if st.get("keyword") else {}, t)
+            is not None)
+        val = number_from({"mmode": "regex", "pattern": st["keyword"]}
+                          if st.get("keyword") else {}, text)
+        return val, [], src, err
+    target, ms, src, err = find_targets(dict(st, which="first"))
+    if not ms and err:
+        return None, [], src, err
+    return len(ms), ms, src, err
+
+
 def find_rule_text(st):
     w = st.get("which", "first")
     if w == "number":
@@ -1423,8 +1442,22 @@ class StepDialog(Dialog):
                                         "read": "🔍 Read",
                                         "paste": "📋 Paste",
                                         "group": "🗂 Group",
-                                        "find": "🎯 Find"}[s.get("type",
-                                                                "click")])
+                                        "find": "🎯 Find",
+                                        "count": "🔢 Count"}[s.get("type",
+                                                                  "click")])
+        self.c_by = tk.StringVar(value="Reading the number" if s.get("by") == "read"
+                                 else "Counting a word")
+        self.c_name = tk.StringVar(value=s.get("save_as") or "count")
+        self.c_use = tk.StringVar(value={"step": "Run a step N times",
+                                         "seq": "Run a sequence N times"}.get(
+            s.get("use"), "Just save it"))
+        self.c_step = tk.StringVar(value=str(s.get("use_step", 1)))
+        first_seq = self.seq_names[0] if self.seq_names else ""
+        self.c_seq = tk.StringVar(value=s.get("use_seq", first_seq))
+        self.c_formula = tk.StringVar(value=s.get("use_n", ""))
+        self.c_op = tk.StringVar(value=s.get("op", "any"))
+        self.c_num = tk.StringVar(value=fmt(s.get("num", 0)))
+        self.c_test = tk.StringVar(value="")
         self.f_kw = tk.StringVar(value=s.get("keyword", ""))
         self.f_mode = tk.StringVar(value={"equals": "Equals",
                                           "regex": "Regex"}.get(
@@ -1515,7 +1548,8 @@ class StepDialog(Dialog):
                cols=2).pack(side="left", fill="x", expand=True)
         self.label(b, "What should this step do?").pack(anchor="w")
         Choice(b, self.type, ["🖱 Click", "⌨ Key", "🔗 Link", "⏱ Wait",
-                              "🔍 Read", "📋 Paste", "🗂 Group", "🎯 Find"],
+                              "🔍 Read", "📋 Paste", "🗂 Group", "🎯 Find",
+                              "🔢 Count"],
                cols=4, size=11).pack(fill="x", pady=(4, 10))
 
         self.area = tk.Frame(b, bg=self.BG)
@@ -1587,16 +1621,6 @@ class StepDialog(Dialog):
         tk.Label(tr, textvariable=self.read_result, bg=self.BG, fg="#0d47a1",
                  font=(FONT, sz(11)), wraplength=sz(330), justify="left",
                  anchor="w").pack(side="left", padx=8, fill="x", expand=True)
-
-        sv = tk.Frame(rd, bg=self.BG)
-        sv.pack(fill="x", pady=(0, 6))
-        self.label(sv, "📥 Save the number as: ").pack(side="left")
-        tk.Entry(sv, textvariable=self.save_as, font=(FONT, sz(13)),
-                 relief="solid", bd=1, width=8).pack(side="left", ipady=sz(4))
-        self.label(rd, "e.g. n → \u201c1,23 unread\u201d saves 123. Use it in "
-                       "\u201cHow many times\u201d (n, n/10…) or as {n} in Paste "
-                       "text. With Regex, a ( ) group picks which number.",
-                   size=10, bold=False, fg="#666").pack(anchor="w")
 
         self.label(rd, "Text must:").pack(anchor="w")
         Choice(rd, self.mmode, ["Contains", "Equals", "Regex", "Number"],
@@ -1731,6 +1755,84 @@ class StepDialog(Dialog):
                  font=(FONT, sz(11)), wraplength=sz(440), justify="left",
                  anchor="w").pack(fill="x", pady=(4, 0))
         self._show_find()
+
+        # --- count panel
+        cp = self.count_panel = tk.Frame(self.area, bg=self.BG)
+        self.label(cp, "Get a number from the screen, give it a name, then use "
+                       "it.", size=11, bold=False, fg="#555").pack(anchor="w")
+        self.label(cp, "Get the number by:").pack(anchor="w", pady=(4, 0))
+        Choice(cp, self.c_by, ["Counting a word", "Reading the number"],
+               cols=2).pack(fill="x", pady=(2, 4))
+        self.c_kw_lbl = self.label(cp, "")
+        self.c_kw_lbl.pack(anchor="w")
+        ckr = tk.Frame(cp, bg=self.BG)
+        ckr.pack(fill="x", pady=(2, 2))
+        cke = tk.Entry(ckr, textvariable=self.f_kw, font=(FONT, sz(14)),
+                       relief="solid", bd=1)
+        cke.pack(side="left", fill="x", expand=True, ipady=sz(6))
+        soft_button(ckr, "⌨", lambda: (cke.focus_set(), open_touch_keyboard()),
+                    size=13, padx=12, pady=4).pack(side="left", padx=(6, 0))
+        self.c_mode_row = Choice(cp, self.f_mode, ["Contains", "Equals",
+                                                   "Regex"], cols=3, size=11)
+        self.c_mode_row.pack(fill="x", pady=(0, 2))
+        self.c_hint = self.label(cp, "", size=10, bold=False, fg="#666")
+        self.c_hint.pack(anchor="w")
+        self.box_buttons(cp, after=lambda: self.f_whole.set(False)
+                         ).pack(fill="x", pady=(8, 4))
+        Toggle(cp, "Search the whole screen", self.f_whole).pack(fill="x")
+        self.label(cp, "Read with:").pack(anchor="w", pady=(6, 0))
+        Choice(cp, self.method, ["Auto", "Windows text", "OCR (picture)"],
+               cols=3, size=11).pack(fill="x", pady=(2, 4))
+        nr2 = tk.Frame(cp, bg=self.BG)
+        nr2.pack(fill="x", pady=(6, 0))
+        self.label(nr2, "📥 Save it as: ").pack(side="left")
+        tk.Entry(nr2, textvariable=self.c_name, font=(FONT, sz(14)),
+                 relief="solid", bd=1, width=10).pack(side="left", ipady=sz(5))
+        self.label(nr2, "  (one word)", size=10, bold=False,
+                   fg="#666").pack(side="left")
+        ct = tk.Frame(cp, bg=self.BG)
+        ct.pack(fill="x", pady=(8, 0))
+        soft_button(ct, "🔍 Test count now", self.test_count).pack(side="left")
+        tk.Label(cp, textvariable=self.c_test, bg=self.BG, fg="#0d47a1",
+                 font=(FONT, sz(12), "bold"), wraplength=sz(440),
+                 justify="left", anchor="w").pack(fill="x", pady=(4, 0))
+
+        self.label(cp, "Use it:").pack(anchor="w", pady=(10, 0))
+        Choice(cp, self.c_use, ["Just save it", "Run a step N times",
+                                "Run a sequence N times"], cols=3, size=11
+               ).pack(fill="x", pady=(2, 2))
+        self.c_use_box = tk.Frame(cp, bg=self.BG)
+        self.c_use_box.pack(fill="x")
+        self.c_step_row = tk.Frame(self.c_use_box, bg=self.BG)
+        self.label(self.c_step_row, "   step number: ").pack(side="left")
+        NumField(self.c_step_row, self.c_step, step=1, minv=1, maxv=999,
+                 width=4).pack(side="left")
+        self.c_seq_row = tk.Frame(self.c_use_box, bg=self.BG)
+        self.label(self.c_seq_row, "   sequence: ").pack(side="left")
+        seq_chooser(self.c_seq_row, self.c_seq, self.seq_names, self
+                    ).pack(side="left", fill="x", expand=True)
+        self.c_n_row = tk.Frame(self.c_use_box, bg=self.BG)
+        self.label(self.c_n_row, "   N = ").pack(side="left")
+        tk.Entry(self.c_n_row, textvariable=self.c_formula,
+                 font=(FONT, sz(14)), relief="solid", bd=1, width=14
+                 ).pack(side="left", ipady=sz(5))
+        self.c_n_hint = self.label(self.c_use_box, "", size=10, bold=False,
+                                   fg="#666")
+
+        self.label(cp, "Check (decides what happens next):").pack(
+            anchor="w", pady=(10, 0))
+        chk = tk.Frame(cp, bg=self.BG)
+        chk.pack(fill="x", pady=(2, 0))
+        Choice(chk, self.c_op, ["any", "=", ">", "<", "≥", "≤"], cols=6,
+               size=11).pack(side="left", fill="x", expand=True)
+        self.c_num_field = NumField(chk, self.c_num, step=1, minv=-1e9,
+                                    maxv=1e9, width=6)
+        self.c_num_field.pack(side="left", padx=(6, 0))
+        self.label(cp, "\u201cany\u201d = always do \u201c✔ If true\u201d below.",
+                   size=10, bold=False, fg="#666").pack(anchor="w")
+        for v in (self.c_by, self.c_use, self.c_name):
+            v.trace_add("write", lambda *a: self._show_count())
+        self._show_count()
 
         # --- group panel (sub-steps)
         gp = self.group_panel = tk.Frame(self.area, bg=self.BG)
@@ -1879,7 +1981,75 @@ class StepDialog(Dialog):
         return {"🖱 Click": "click", "⌨ Key": "key", "🔗 Link": "link",
                 "⏱ Wait": "wait", "🔍 Read": "read",
                 "📋 Paste": "paste", "🗂 Group": "group",
-                "🎯 Find": "find"}[self.type.get()]
+                "🎯 Find": "find", "🔢 Count": "count"}[self.type.get()]
+
+    def _show_count(self):
+        if not hasattr(self, "c_n_hint"):
+            return
+        reading = self.c_by.get().startswith("Reading")
+        self.c_kw_lbl.config(text="Optional pattern (Regex; a ( ) group picks "
+                                  "the number):" if reading else
+                             "Word to count:")
+        self.c_hint.config(
+            text="e.g. (\\d[\\d,]*)\\s+unread  ·  \u201c1,23 unread\u201d → 123  "
+                 "·  leave empty = first number in the area" if reading else
+            "Counts every place this word appears (e.g. 5 × \u201cunread\u201d).")
+        if reading:
+            self.c_mode_row.pack_forget()
+        else:
+            self.c_mode_row.pack(fill="x", pady=(0, 2), before=self.c_hint)
+        for r in (self.c_step_row, self.c_seq_row, self.c_n_row,
+                  self.c_n_hint):
+            r.pack_forget()
+        use = self.c_use.get()
+        name = self.c_name.get().strip() or "count"
+        if use != "Just save it":
+            (self.c_step_row if use.startswith("Run a step")
+             else self.c_seq_row).pack(fill="x", pady=(2, 0))
+            self.c_n_row.pack(fill="x", pady=(2, 0))
+            self.c_n_hint.config(text=f"N can be {name}, {name}/5 (rounds down), "
+                                      f"ceil({name}/5), {name}-1, "
+                                      f"min({name}, 10)… Empty = {name}.")
+            self.c_n_hint.pack(anchor="w")
+
+    def _count_step(self):
+        reading = self.c_by.get().startswith("Reading")
+        fs = self._find_step()
+        fs.update(by="read" if reading else "count",
+                  save_as=self.c_name.get().strip() or "count")
+        if reading:
+            fs["fmode"] = "regex"
+        return fs
+
+    def test_count(self):
+        cs = self._count_step()
+        if cs["by"] == "count" and not cs["keyword"]:
+            self.c_test.set("Type the word to count first")
+            return
+        wins = self.chain()
+        for w in wins:
+            w.withdraw()
+        self.update()
+        time.sleep(0.35)
+        value, ms, src, err = count_on_screen(cs)
+
+        def back():
+            for w in reversed(wins):
+                w.deiconify()
+            self.lift()
+
+        if ms and cs["by"] == "count":
+            show_find_overlay(wins[-1], ms, None, 3.5)
+            self.after(3600, back)
+        else:
+            back()
+        src = {"uia": "Windows text", "ocr": "OCR"}.get(src, src)
+        if value is None:
+            self.c_test.set("No number found" + (f" ({err[:100]})" if err else ""))
+        else:
+            self.c_test.set(f"{cs['save_as']} = {fmt(value)}"
+                            + (f"   ({len(ms)} found, {src})"
+                               if cs["by"] == "count" else f"   ({src})"))
 
     def _show_goto(self, var, frame, qframe, after):
         frame.pack_forget()
@@ -2140,7 +2310,8 @@ class StepDialog(Dialog):
     def show(self):
         for p in (self.click_panel, self.key_panel, self.repeat_panel,
                   self.link_panel, self.read_panel, self.paste_panel,
-                  self.group_panel, self.find_panel, self.after_match):
+                  self.group_panel, self.find_panel, self.count_panel,
+                  self.after_match):
             p.pack_forget()
         k = self.kind()
         if k == "click":
@@ -2160,6 +2331,11 @@ class StepDialog(Dialog):
             self.find_panel.pack(fill="x")
             self.yes_title.set("✔ If found (after clicking it):")
             self.no_title.set("✖ If not found:")
+            self.after_match.pack(fill="x")
+        elif k == "count":
+            self.count_panel.pack(fill="x")
+            self.yes_title.set("✔ If the check is true:")
+            self.no_title.set("✖ If not (or no number found):")
             self.after_match.pack(fill="x")
         elif k == "paste":
             self.paste_panel.pack(fill="x")
@@ -2227,6 +2403,44 @@ class StepDialog(Dialog):
             if st["mmode"] == "regex":
                 try:
                     re.compile(st["pattern"])
+                except re.error as e:
+                    messagebox.showerror("Step", f"Regex problem: {e}",
+                                         parent=self)
+                    return
+        elif k == "count":
+            st.update(self._count_step())
+            st.update(use={"Run a step N times": "step",
+                           "Run a sequence N times": "seq"}.get(
+                          self.c_use.get(), "save"),
+                      use_step=max(1, int(fnum(self.c_step.get(), 1))),
+                      use_seq=self.c_seq.get(),
+                      use_n=self.c_formula.get().strip(),
+                      op=self.c_op.get(), num=fnum(self.c_num.get()),
+                      timeout=max(0, fnum(self.timeout.get())),
+                      on_yes=self.on_yes.get(),
+                      yes_step=max(1, int(fnum(self.yes_step.get(), 1))),
+                      on_no=self.on_no.get(),
+                      no_step=max(1, int(fnum(self.no_step.get(), 1))),
+                      yes_seq=self.yes_seq.get(), no_seq=self.no_seq.get())
+            if not VAR_RE.match(st["save_as"]):
+                messagebox.showerror("Step", "\u201cSave it as\u201d must be one "
+                                     "word, like count or unread", parent=self)
+                return
+            if st["by"] == "count" and not st["keyword"]:
+                messagebox.showerror("Step", "Type the word to count",
+                                     parent=self)
+                return
+            if st["use_n"]:
+                try:
+                    check_formula(st["use_n"])
+                except (ValueError, SyntaxError) as e:
+                    messagebox.showerror("Step", f"N must be a number or a "
+                                         f"formula like count/5.\n\n{e}",
+                                         parent=self)
+                    return
+            if st["keyword"] and (st["fmode"] == "regex"):
+                try:
+                    re.compile(st["keyword"])
                 except re.error as e:
                     messagebox.showerror("Step", f"Regex problem: {e}",
                                          parent=self)
@@ -2875,6 +3089,18 @@ def describe(st):
         d = f"⌨ {st.get('key')}"
     elif t == "link":
         d = f"🔗 {st.get('url')}"
+    elif t == "count":
+        nm = st.get("save_as", "count")
+        how = (f"count \u201c{st.get('keyword', '')}\u201d" if st.get("by") != "read"
+               else "read number")
+        use = {"step": f" · run step {st.get('use_step', 1)} × "
+                       f"{st.get('use_n') or nm}",
+               "seq": f" · run \u201c{st.get('use_seq', '?')}\u201d × "
+                      f"{st.get('use_n') or nm}"}.get(st.get("use"), "")
+        chk = ("" if st.get("op", "any") == "any" else
+               f" · if {nm} {st.get('op')} {fmt(st.get('num', 0))}")
+        return (f"🔢 {nm} = {how}{use}{chk} → ✔ {action_text(st, True)} / "
+                f"✖ {action_text(st, False)}")
     elif t == "find":
         return (f"🎯 Find & click: {find_rule_text(st)} → "
                 f"✔ {action_text(st, True)} / ✖ {action_text(st, False)}")
@@ -4537,7 +4763,99 @@ class App:
                     return k
         return None
 
-    def call_seq(self, j, ctx):
+    def do_count(self, st, ctx, steps, i, nxt, label, sid, prefix):
+        """Count step: get a number, save it, use it, then check it."""
+        n, loop = ctx["n"], ctx["loop"]
+        name = st.get("save_as") or "count"
+        limit = fnum(st.get("timeout", 0))
+        end = self.vnow() + limit
+        value, ms = None, []
+        while not self.stop.is_set():
+            self.gate()
+            x0, y0, w, h = find_area(st)
+            r = self.mini_rect
+            covered = r and (st.get("whole", True) or not (
+                x0 + w < r[0] or x0 > r[2] or y0 + h < r[1] or y0 > r[3]))
+            if covered:
+                self.q.put(("mini_hide", None))
+                time.sleep(0.3)
+            try:
+                value, ms, src, err = count_on_screen(st)
+            finally:
+                if covered:
+                    self.q.put(("mini_show", None))
+            if value is not None and (st.get("by") == "read" or value > 0
+                                      or self.vnow() >= end):
+                break
+            if self.vnow() >= end:
+                break
+            self.wait(min(0.7, max(0.0, end - self.vnow())),
+                      f"looking for \u201c{st.get('keyword', '')}\u201d")
+        n["read"] += 1
+        if value is not None:
+            ctx["vars"][name] = value
+            self.q.put(("live", {"vars": dict(ctx["vars"])}))
+        self.log(f"seq {loop} {sid} count {name} "
+                 f"{fmt(value) if value is not None else 'none'}")
+        if self.stop.is_set():
+            return "stop", None, nxt
+        # ---- use it
+        use = st.get("use", "save")
+        if use in ("step", "seq") and value is not None:
+            expr = st.get("use_n") or name
+            try:
+                times = max(0, int(math.floor(calc_formula(expr, ctx["vars"]))))
+            except Exception as e:
+                return self._halt(ctx, f"step {sid}: {e}"), None, nxt
+            self.log(f"seq {loop} {sid} use {use} {expr}={times}")
+            if use == "step":
+                j = int(st.get("use_step", 1)) - 1
+                if not (0 <= j < len(steps)) or j == i:
+                    return self._halt(ctx, f"step {sid}: step number "
+                                           f"{j + 1} can't be used"), None, nxt
+                for k in range(times):
+                    if self.stop.is_set():
+                        break
+                    self.q.put(("status", f"{label} · running step {j + 1} "
+                                          f"({k + 1}/{times})"))
+                    sub = self.exec_steps([steps[j]], ctx, f"{prefix}{j + 1}/")
+                    if sub == "stop" or isinstance(sub, tuple):
+                        return sub, None, nxt
+            else:
+                jj = self._target_seq(ctx["seqs"], "goto", st.get("use_seq"),
+                                      ctx["cur"])
+                if jj is None:
+                    return self._halt(ctx, "sequence not found"), None, nxt
+                for k in range(times):
+                    if self.stop.is_set():
+                        break
+                    self.q.put(("status", f"{label} · running "
+                                          f"\u201c{st.get('use_seq')}\u201d "
+                                          f"({k + 1}/{times})"))
+                    sub = self.call_seq(jj, ctx, once=True)
+                    if sub:
+                        return sub, None, nxt
+        # ---- check
+        op = st.get("op", "any")
+        if value is None:
+            ok = False
+        elif op == "any":
+            ok = True
+        else:
+            num = fnum(st.get("num", 0))
+            ok = {"=": value == num, ">": value > num, "<": value < num,
+                  "≥": value >= num, "≤": value <= num}.get(op, False)
+        rule = ("" if op == "any" else f" · check {name} {op} "
+                                       f"{fmt(st.get('num', 0))}")
+        self.q.put(("read", {
+            "text": f"{name} = {fmt(value) if value is not None else '—'}"
+                    + (f"  ({len(ms)} found)" if st.get("by") != "read" else ""),
+            "src": "", "ok": ok, "rule": f"🔢 count{rule}", "final": True,
+            "action": action_text(st, ok)}))
+        self.q.put(("count", n))
+        return self._branch(st, ok, ctx, steps, nxt, "Count")
+
+    def call_seq(self, j, ctx, once=False):
         """Run sequence j (its own repeat count, forever = once), then come
         back. Returns None to continue, or 'stop' / ('seq', i)."""
         depth = ctx.get("depth", 0)
@@ -4546,7 +4864,7 @@ class App:
         saved = {k: ctx[k] for k in ("cur", "sname", "loop", "total")}
         sq = ctx["seqs"][j]
         loops = max(0, int(fnum(sq.get("loops", 1))))
-        loops = loops or 1
+        loops = 1 if once else (loops or 1)
         ctx.update(cur=j, sname=sq["name"], depth=depth + 1)
         self.log(f"seq 0 0 call {sq['name']}")
         if not ctx["test"]:
@@ -4722,6 +5040,11 @@ class App:
                                       f"{'✔' if ok else '✖'} "
                                       f"{action_text(st, ok)}"))
                 ret, sig, nxt = self._branch(st, ok, ctx, steps, nxt, "Read")
+                if ret:
+                    return ret
+            elif t == "count":
+                ret, sig, nxt = self.do_count(st, ctx, steps, i, nxt, label,
+                                              sid, prefix)
                 if ret:
                     return ret
             elif t == "find":

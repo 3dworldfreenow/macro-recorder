@@ -728,6 +728,61 @@ jobs:
           Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "TextTest" } | Stop-Process
           "VARIABLES TEST PASSED"
 
+      - name: Test Count step (count word, run step / sequence N times, check)
+        shell: pwsh
+        run: |
+          Start-Process pwsh -ArgumentList "-NoProfile -File tests\findtest.ps1" -WorkingDirectory $pwd
+          Start-Sleep 7
+          (New-Object -ComObject WScript.Shell).AppActivate("FindTest") | Out-Null
+          $c = (Get-Content findtest_pos.txt).Split(' '); $cx=[int]$c[0]; $cy=[int]$c[1]
+          $area = @{whole=$false; x=$cx; y=$cy; aw=480; ah=320}
+          function C($kw, $mode, $method, $name, $extra) {
+            $h = @{type="count"; by="count"; keyword=$kw; fmode=$mode; method=$method; save_as=$name; use="save"; op="any"; num=0; on_yes="Continue"; on_no="Stop"; amin=0.3; amax=0.3}
+            foreach ($k in $area.Keys) { $h[$k] = $area[$k] }
+            foreach ($k in $extra.Keys) { $h[$k] = $extra[$k] }
+            return $h
+          }
+          $main = @(
+            (C "Accept" "equals" "uia" "acc" @{use="step"; use_step=5; use_n="acc*3"; op=[string][char]0x2265; num=2; on_yes="Go to step"; yes_step=3}),
+            @{type="key"; key="End"; name="SKIPPED"; amin=0; amax=0},
+            (C "Banana" "contains" "auto" "b" @{op="="; num=0}),
+            (C "Accept" "equals" "ocr" "acc2" @{use="seq"; use_seq="Helper"; use_n=""}),
+            @{type="key"; key="Home"; name="target"; amin=0.1; amax=0.1}
+          )
+          $seqs = @(
+            @{name="Main"; loops="1"; then="stop"; steps=$main},
+            @{name="Helper"; loops="1"; then="stop"; steps=@(@{type="key"; key="Page Down"; amin=0.1; amax=0.1})}
+          )
+          @{seqs=$seqs} | ConvertTo-Json -Depth 8 | Set-Content seq_count.json -Encoding utf8
+          $a = "--mode sequence --seq-file $pwd\seq_count.json --seq Main --start --no-settings --delay 1 --quit-when-done --log $pwd\count_log.txt"
+          Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList $a -PassThru | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+          "--- count log"; Get-Content count_log.txt
+          $log = Get-Content count_log.txt
+          $home_ = @($log | Where-Object { $_ -match " key Home$" }).Count
+          $end_ = @($log | Where-Object { $_ -match " key End$" }).Count
+          $pd = @($log | Where-Object { $_ -match " key Page Down$" }).Count
+          "Home x$home_ · End x$end_ · Page Down x$pd"
+          if (-not ($log -match " count acc 2$")) { throw "acc should be 2" }
+          if (-not ($log -match " count b 0$")) { throw "b should be 0" }
+          if (-not ($log -match " count acc2 2$")) { throw "acc2 (OCR) should be 2" }
+          if (-not ($log -match " use step acc\*3=6$")) { throw "should run step 5 acc*3 = 6 times" }
+          if ($home_ -ne 7) { throw "Home: 6 from the count + 1 normal = 7" }
+          if ($end_ -ne 0) { throw "step 2 should be skipped (check acc >= 2 -> go to step 3)" }
+          if ($pd -ne 2) { throw "Helper should run acc2 = 2 times" }
+          Get-Process pwsh | Where-Object { $_.MainWindowTitle -eq "FindTest" } | Stop-Process
+          "COUNT TEST PASSED"
+
+      - name: Screenshot Count step editor
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $p = Start-Process dist\KeyPresser\KeyPresser.exe -ArgumentList "--no-settings --seq-file $pwd\seq_count.json --seq Main --open-step-editor 0" -PassThru
+          Start-Sleep 7
+          $bmp = New-Object System.Drawing.Bitmap 1024, 768
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen(0, 0, 0, 0, [System.Drawing.Size]::new(1024, 768))
+          $bmp.Save("$pwd\kp_step_count.png")
+          $p | Stop-Process
+
       - name: Screenshot Find step editor and test-find boxes
         shell: pwsh
         run: |
@@ -784,6 +839,7 @@ jobs:
             kp_step_find.png
             kp_draw_box.png
             kp_recording.png
+            kp_step_count.png
             kp_size_small.png
             kp_size_large.png
           make_latest: false
